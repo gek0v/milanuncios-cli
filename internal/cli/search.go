@@ -17,6 +17,7 @@ func (a *App) searchCmd() *cobra.Command {
 		sort     string
 		limit    int
 		next     string
+		filters  []string
 	)
 
 	cmd := &cobra.Command{
@@ -44,6 +45,11 @@ or formatted in a clean table with --format pretty.`,
 				}
 			}
 
+			filterMap, err := parseFilterFlags(filters)
+			if err != nil {
+				return err
+			}
+
 			q := milanuncios.SearchQuery{
 				Keywords: keywords,
 				MinPrice: minPrice,
@@ -53,6 +59,7 @@ or formatted in a clean table with --format pretty.`,
 				Sort:     sort,
 				Limit:    limit,
 				Next:     next,
+				Filters:  filterMap,
 			}
 
 			res, err := a.Client.Search(cmd.Context(), q)
@@ -72,8 +79,53 @@ or formatted in a clean table with --format pretty.`,
 	flags.StringVar(&sort, "sort", "relevance", "sort order: relevance, newest, price_asc, price_desc")
 	flags.IntVar(&limit, "limit", 20, "maximum number of results per page")
 	flags.StringVar(&next, "next", "", "pagination cursor for the next page")
+	flags.StringArrayVar(&filters, "filter", nil, "category-specific filter in key=value format (repeatable)")
 
 	_ = cmd.RegisterFlagCompletionFunc("sort", cobra.FixedCompletions([]string{"relevance", "newest", "price_asc", "price_desc"}, cobra.ShellCompDirectiveNoFileComp))
 
+	cmd.AddCommand(a.searchFiltersCmd())
+
 	return cmd
+}
+
+func (a *App) searchFiltersCmd() *cobra.Command {
+	var categoryID int
+
+	cmd := &cobra.Command{
+		Use:   "filters --category <id>",
+		Short: "List available attribute filters for a given category",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if categoryID <= 0 {
+				return output.Usagef("--category ID is required (e.g. milanuncios search filters --category 10)")
+			}
+
+			res, err := a.Client.GetCategoryFilters(cmd.Context(), categoryID)
+			if err != nil {
+				return err
+			}
+
+			return a.Printer.Print(res)
+		},
+	}
+
+	cmd.Flags().IntVar(&categoryID, "category", 0, "numeric category ID")
+	_ = cmd.MarkFlagRequired("category")
+
+	return cmd
+}
+
+func parseFilterFlags(flags []string) (map[string]string, error) {
+	if len(flags) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(flags))
+	for _, f := range flags {
+		parts := strings.SplitN(f, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return nil, output.Usagef("invalid filter format %q (expected key=value)", f)
+		}
+		out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return out, nil
 }

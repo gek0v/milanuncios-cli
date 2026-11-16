@@ -83,6 +83,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 
 	root.AddCommand(
 		a.searchCmd(),
+		a.categoryCmd(),
 		a.adCmd(),
 		a.configCmd(),
 	)

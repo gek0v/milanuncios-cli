@@ -288,10 +288,41 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 	if q.Next != "" {
 		params.Set("next", q.Next)
 	}
+	for k, v := range q.Filters {
+		if k != "" && v != "" {
+			params.Set("filter["+k+"]", v)
+		}
+	}
 
 	var res SearchResult
 	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/search", params, &res); err != nil {
 		return nil, err
+	}
+	return &res, nil
+}
+
+// ListCategories retrieves the category taxonomy tree.
+func (c *Client) ListCategories(ctx context.Context) (CategoryListResult, error) {
+	var cats CategoryListResult
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/categories", nil, &cats); err != nil {
+		return nil, err
+	}
+	return cats, nil
+}
+
+// GetCategoryFilters returns dynamic filter definitions available for a given category.
+func (c *Client) GetCategoryFilters(ctx context.Context, categoryID int) (*CategoryFiltersResult, error) {
+	if categoryID <= 0 {
+		return nil, output.Usagef("category ID must be greater than 0")
+	}
+
+	path := fmt.Sprintf("/api/v1/categories/%d/filters", categoryID)
+	var res CategoryFiltersResult
+	if err := c.doRequest(ctx, http.MethodGet, path, nil, &res); err != nil {
+		return nil, err
+	}
+	if res.CategoryID == 0 {
+		res.CategoryID = categoryID
 	}
 	return &res, nil
 }

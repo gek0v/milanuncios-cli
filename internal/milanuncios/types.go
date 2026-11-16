@@ -3,6 +3,7 @@ package milanuncios
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/gek0v/milanuncios-cli/internal/output"
@@ -108,6 +109,87 @@ func (r *ImagesResult) Pretty(w io.Writer, color bool) {
 	}
 }
 
+// Category represents a node in the Milanuncios category taxonomy.
+type Category struct {
+	ID       int        `json:"id"`
+	Name     string     `json:"name"`
+	Slug     string     `json:"slug,omitempty"`
+	Children []Category `json:"children,omitempty"`
+}
+
+// CategoryListResult is a slice of categories with human-readable table rendering.
+type CategoryListResult []Category
+
+// Pretty prints the categories taxonomy with indentation.
+func (l CategoryListResult) Pretty(w io.Writer, color bool) {
+	if len(l) == 0 {
+		fmt.Fprintln(w, "No categories available.")
+		return
+	}
+
+	header := []string{"ID", "NAME", "SLUG"}
+	var rows [][]string
+	for _, c := range l {
+		rows = append(rows, []string{
+			strconv.Itoa(c.ID),
+			c.Name,
+			c.Slug,
+		})
+		for _, child := range c.Children {
+			rows = append(rows, []string{
+				"  " + strconv.Itoa(child.ID),
+				"  └─ " + child.Name,
+				child.Slug,
+			})
+		}
+	}
+	output.Table(w, color, header, rows)
+}
+
+// FilterDefinition describes an attribute filter available for a category.
+type FilterDefinition struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Type        string   `json:"type"` // "string", "number", "select", "boolean"
+	Options     []string `json:"options,omitempty"`
+	Description string   `json:"description,omitempty"`
+}
+
+// CategoryFiltersResult holds category metadata and valid filter keys.
+type CategoryFiltersResult struct {
+	CategoryID   int                `json:"category_id"`
+	CategoryName string             `json:"category_name,omitempty"`
+	Filters      []FilterDefinition `json:"filters"`
+}
+
+// Pretty prints category filter definitions in a structured table.
+func (r *CategoryFiltersResult) Pretty(w io.Writer, color bool) {
+	if len(r.Filters) == 0 {
+		fmt.Fprintf(w, "No specific filters found for category %d\n", r.CategoryID)
+		return
+	}
+
+	catName := r.CategoryName
+	if catName == "" {
+		catName = fmt.Sprintf("ID %d", r.CategoryID)
+	}
+	fmt.Fprintf(w, "Available filters for %s:\n\n", catName)
+
+	header := []string{"KEY", "LABEL", "TYPE", "OPTIONS"}
+	var rows [][]string
+	for _, f := range r.Filters {
+		opts := strings.Join(f.Options, ", ")
+		rows = append(rows, []string{
+			f.Key,
+			f.Label,
+			f.Type,
+			output.Truncate(opts, 45),
+		})
+	}
+	output.Table(w, color, header, rows)
+	fmt.Fprintln(w, "\nApply filters in search with: milanuncios search --category <id> --filter key=value")
+}
+
 // SearchQuery specifies criteria for querying Milanuncios listings.
 type SearchQuery struct {
 	Keywords string
@@ -118,6 +200,7 @@ type SearchQuery struct {
 	Sort     string // "relevance", "newest", "price_asc", "price_desc"
 	Limit    int
 	Next     string
+	Filters  map[string]string
 }
 
 // SearchResult contains a page of listings and pagination info.
