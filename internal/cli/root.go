@@ -91,6 +91,8 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.configCmd(),
 		a.watchCmd(),
 		a.sinkCmd(),
+		a.mcpCmd(),
+		a.skillsCmd(),
 	)
 
 	return root
