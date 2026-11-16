@@ -11,6 +11,7 @@ import (
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
+	"github.com/gek0v/milanuncios-cli/internal/sink"
 	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/gek0v/milanuncios-cli/internal/watch"
 	"github.com/spf13/cobra"
@@ -43,6 +44,16 @@ func parseIntervalSec(val string) (int, error) {
 
 func (a *App) getStore() (*store.Store, error) {
 	return store.Open(a.Paths.StateDB)
+}
+
+func (a *App) newWatchEngine(st *store.Store) *watch.Engine {
+	eng := watch.NewEngine(st, a.Client)
+	if a.Cfg != nil && len(a.Cfg.Sinks) > 0 {
+		if mgr, err := sink.NewManager(a.Cfg.Sinks); err == nil {
+			eng.Sinks = mgr
+		}
+	}
+	return eng
 }
 
 func (a *App) watchCmd() *cobra.Command {
@@ -239,7 +250,7 @@ func (a *App) watchCheckCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			eng := watch.NewEngine(st, a.Client)
+			eng := a.newWatchEngine(st)
 
 			if len(args) == 1 {
 				w, err := st.GetWatch(args[0])
@@ -417,7 +428,7 @@ func (a *App) watchRunCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			eng := watch.NewEngine(st, a.Client)
+			eng := a.newWatchEngine(st)
 			ticker := time.NewTicker(time.Duration(sec) * time.Second)
 			defer ticker.Stop()
 

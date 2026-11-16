@@ -12,10 +12,16 @@ import (
 	"github.com/gek0v/milanuncios-cli/internal/store"
 )
 
+// SinkSender sends an event to an external notification channel.
+type SinkSender interface {
+	Dispatch(ctx context.Context, ev store.Event) []error
+}
+
 // Engine orchestrates periodic checks, diffing, and event generation for watches.
 type Engine struct {
 	Store  *store.Store
 	Client *milanuncios.Client
+	Sinks  SinkSender
 	Notice func(string)
 }
 
@@ -65,6 +71,20 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 
 	default:
 		return nil, output.Usagef("unknown watch type %q", w.Type)
+	}
+
+	// Dispatch to external sinks and mark delivered
+	if e.Sinks != nil && len(res.Events) > 0 {
+		var deliveredIDs []int64
+		for _, ev := range res.Events {
+			errs := e.Sinks.Dispatch(ctx, ev)
+			if len(errs) == 0 {
+				deliveredIDs = append(deliveredIDs, ev.ID)
+			}
+		}
+		if len(deliveredIDs) > 0 {
+			_ = e.Store.MarkEventsDelivered(deliveredIDs)
+		}
 	}
 
 	res.Duration = time.Since(start)

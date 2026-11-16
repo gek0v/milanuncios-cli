@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -786,6 +787,72 @@ func TestWatchCommands(t *testing.T) {
 
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("watch remove failed: %v", err)
+		}
+	}
+}
+
+func TestSinkCommands(t *testing.T) {
+	var receivedWebhook bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedWebhook = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.toml")
+	cfgContent := fmt.Sprintf(`
+[sinks.alerts-hook]
+type = "webhook"
+url = "%s"
+`, ts.URL)
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	t.Setenv("MILANUNCIOS_CONFIG", cfgFile)
+
+	// 1. sink list
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"sink", "list", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("sink list failed: %v", err)
+		}
+		var list []map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+			t.Fatalf("failed to decode sink list: %v", err)
+		}
+		if len(list) != 1 || list[0]["name"] != "alerts-hook" {
+			t.Fatalf("unexpected sink list: %+v", list)
+		}
+	}
+
+	// 2. sink test
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"sink", "test", "alerts-hook", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("sink test failed: %v", err)
+		}
+		if !receivedWebhook {
+			t.Fatal("expected webhook to receive mock event")
 		}
 	}
 }

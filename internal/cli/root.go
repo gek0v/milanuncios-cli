@@ -90,6 +90,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.meCmd(),
 		a.configCmd(),
 		a.watchCmd(),
+		a.sinkCmd(),
 	)
 
 	return root

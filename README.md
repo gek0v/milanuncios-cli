@@ -30,7 +30,7 @@ El desarrollo del proyecto se ejecutará mediante incrementos atómicos con regi
 - [x] **Slice 4**: Taxonomía de categorías y filtros específicos (`category list`, `--filter clave=valor`).
 - [x] **Slice 5**: Autenticación web segura por cookies, gestión de perfiles (`auth login`, `me`).
 - [x] **Slice 6**: Motor local de monitorización y persistencia con SQLite (`watch add`, `watch check`, `watch run`).
-- [ ] **Slice 7**: Canales de notificación (`sinks`: ntfy, webhooks, exec).
+- [x] **Slice 7**: Canales de notificación (`sinks`: ntfy, webhooks, exec).
 - [ ] **Slice 8**: Servidor MCP (*Model Context Protocol*) para Agentes de IA.
 - [ ] **Slice 9**: Mensajería y chat.
 - [ ] **Slice 10**: Sitio web de documentación, generador de referencia y empaquetado multiplataforma.
