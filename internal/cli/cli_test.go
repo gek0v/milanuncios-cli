@@ -906,3 +906,146 @@ func TestMCPAndSkillsCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestChatCommands(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet:
+			convs := milanuncios.ConversationList{
+				{
+					ID:          "conv-101",
+					AdID:        "492817294",
+					AdTitle:     "Bicicleta carretera",
+					AdPrice:     450,
+					UserName:    "Carlos",
+					LastMessage: "¿Aceptas 400€?",
+					Unread:      true,
+				},
+			}
+			_ = json.NewEncoder(w).Encode(convs)
+
+		case r.URL.Path == "/api/v1/conversations/conv-101" && r.Method == http.MethodGet:
+			details := milanuncios.ConversationDetails{
+				Conversation: milanuncios.Conversation{
+					ID:          "conv-101",
+					AdID:        "492817294",
+					AdTitle:     "Bicicleta carretera",
+					AdPrice:     450,
+					UserName:    "Carlos",
+					LastMessage: "¿Aceptas 400€?",
+				},
+				Messages: []milanuncios.Message{
+					{
+						ID:             "msg-1",
+						ConversationID: "conv-101",
+						SenderName:     "Carlos",
+						Text:           "Hola, ¿sigue disponible?",
+						SentAt:         "10:00",
+					},
+					{
+						ID:             "msg-2",
+						ConversationID: "conv-101",
+						SenderName:     "Carlos",
+						Text:           "¿Aceptas 400€?",
+						SentAt:         "10:05",
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(details)
+
+		case r.URL.Path == "/api/v1/conversations/conv-101/messages" && r.Method == http.MethodPost:
+			msg := milanuncios.Message{
+				ID:             "msg-3",
+				ConversationID: "conv-101",
+				SenderName:     "Tú",
+				Text:           "Hola Carlos, sí, por 420€ cerramos trato",
+				SentAt:         "10:15",
+				FromMe:         true,
+			}
+			_ = json.NewEncoder(w).Encode(msg)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	t.Setenv("MILANUNCIOS_SESSION_TOKEN", "valid-chat-token")
+
+	// 1. chat list
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"chat", "list", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("chat list failed: %v", err)
+		}
+		var list []milanuncios.Conversation
+		if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+			t.Fatalf("failed to decode conversation list: %v", err)
+		}
+		if len(list) != 1 || list[0].ID != "conv-101" {
+			t.Fatalf("unexpected conversation list: %+v", list)
+		}
+	}
+
+	// 2. chat show
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"chat", "show", "conv-101", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("chat show failed: %v", err)
+		}
+		var details milanuncios.ConversationDetails
+		if err := json.Unmarshal(stdout.Bytes(), &details); err != nil {
+			t.Fatalf("failed to decode conversation details: %v", err)
+		}
+		if len(details.Messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d", len(details.Messages))
+		}
+	}
+
+	// 3. chat send
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"chat", "send", "conv-101", "Hola Carlos, sí, por 420€ cerramos trato", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("chat send failed: %v", err)
+		}
+		var msg milanuncios.Message
+		if err := json.Unmarshal(stdout.Bytes(), &msg); err != nil {
+			t.Fatalf("failed to decode sent message: %v", err)
+		}
+		if !msg.FromMe || !strings.Contains(msg.Text, "420€") {
+			t.Fatalf("unexpected sent message: %+v", msg)
+		}
+	}
+}

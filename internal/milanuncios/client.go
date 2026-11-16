@@ -450,6 +450,47 @@ func (c *Client) Unfavorite(ctx context.Context, adID string) error {
 	return c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, true, nil)
 }
 
+// ListConversations retrieves the user's active chat conversations.
+func (c *Client) ListConversations(ctx context.Context) (ConversationList, error) {
+	var list ConversationList
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations", nil, true, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// GetConversation retrieves the message history for a specific conversation ID.
+func (c *Client) GetConversation(ctx context.Context, id string) (*ConversationDetails, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil, output.Usagef("conversation ID cannot be empty")
+	}
+	var details ConversationDetails
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations/"+trimmed, nil, true, &details); err != nil {
+		return nil, err
+	}
+	return &details, nil
+}
+
+// SendMessage sends a text message to a conversation thread.
+func (c *Client) SendMessage(ctx context.Context, convID, text string) (*Message, error) {
+	trimmedID := strings.TrimSpace(convID)
+	trimmedText := strings.TrimSpace(text)
+	if trimmedID == "" {
+		return nil, output.Usagef("conversation ID cannot be empty")
+	}
+	if trimmedText == "" {
+		return nil, output.Usagef("message text cannot be empty")
+	}
+
+	params := url.Values{"text": {trimmedText}}
+	var msg Message
+	if err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/conversations/%s/messages", trimmedID), params, true, &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
 // ParseCookies extracts the session token from browser export formats:
 // JSON (Cookie-Editor, EditThisCookie), Netscape/curl cookies.txt, or raw Cookie header.
 func ParseCookies(raw string) (string, error) {
