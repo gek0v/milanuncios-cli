@@ -88,6 +88,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.categoryCmd(),
 		a.adCmd(),
 		a.meCmd(),
+		a.chatCmd(),
 		a.configCmd(),
 		a.watchCmd(),
 		a.sinkCmd(),

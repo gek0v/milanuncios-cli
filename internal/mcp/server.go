@@ -313,6 +313,46 @@ func (s *Server) getToolDefinitions() []toolInfo {
 				},
 			},
 		},
+		{
+			Name:        "milanuncios_chat_list",
+			Description: "List active chat conversations for the authenticated user.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			Name:        "milanuncios_chat_show",
+			Description: "View full message history for a specific conversation ID.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"conversation_id": map[string]any{
+						"type":        "string",
+						"description": "Conversation thread ID",
+					},
+				},
+				"required": []string{"conversation_id"},
+			},
+		},
+		{
+			Name:        "milanuncios_chat_send",
+			Description: "Send a text message in an existing Milanuncios conversation.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"conversation_id": map[string]any{
+						"type":        "string",
+						"description": "Conversation thread ID",
+					},
+					"text": map[string]any{
+						"type":        "string",
+						"description": "Text message content to send",
+					},
+				},
+				"required": []string{"conversation_id", "text"},
+			},
+		},
 	}
 }
 
@@ -486,6 +526,45 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		}
 
 		b, _ := json.MarshalIndent(events, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_chat_list":
+		list, err := s.Client.ListConversations(ctx)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_chat_show":
+		convID, _ := args["conversation_id"].(string)
+		if convID == "" {
+			return nil, fmt.Errorf("conversation_id is required")
+		}
+		details, err := s.Client.GetConversation(ctx, convID)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(details, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_chat_send":
+		convID, _ := args["conversation_id"].(string)
+		text, _ := args["text"].(string)
+		if convID == "" || text == "" {
+			return nil, fmt.Errorf("conversation_id and text are required")
+		}
+		msg, err := s.Client.SendMessage(ctx, convID, text)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(msg, "", "  ")
 		return &toolCallResult{
 			Content: []contentItem{{Type: "text", Text: string(b)}},
 		}, nil

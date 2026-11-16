@@ -295,3 +295,102 @@ func (u *UserProfile) Pretty(w io.Writer, color bool) {
 		fmt.Fprintf(w, "Miembro desde: %s\n", u.CreatedAt)
 	}
 }
+
+// Conversation represents a chat thread associated with an ad listing.
+type Conversation struct {
+	ID          string  `json:"id"`
+	AdID        string  `json:"ad_id"`
+	AdTitle     string  `json:"ad_title"`
+	AdPrice     float64 `json:"ad_price"`
+	UserName    string  `json:"user_name"`
+	LastMessage string  `json:"last_message"`
+	LastSentAt  string  `json:"last_sent_at"`
+	Unread      bool    `json:"unread"`
+}
+
+// ConversationList wraps conversations for tabular rendering.
+type ConversationList []Conversation
+
+// Pretty renders conversation threads in a table.
+func (cl ConversationList) Pretty(w io.Writer, color bool) {
+	if len(cl) == 0 {
+		fmt.Fprintln(w, "No conversations found.")
+		return
+	}
+
+	header := []string{"ID", "USER", "ITEM", "PRICE", "LAST MESSAGE", "UNREAD"}
+	rows := make([][]string, 0, len(cl))
+
+	for _, c := range cl {
+		unreadStr := "no"
+		if c.Unread {
+			unreadStr = "YES"
+		}
+
+		priceStr := fmt.Sprintf("%.0f €", c.AdPrice)
+		if c.AdPrice == 0 {
+			priceStr = "-"
+		}
+
+		rows = append(rows, []string{
+			c.ID,
+			output.Truncate(c.UserName, 20),
+			output.Truncate(c.AdTitle, 26),
+			priceStr,
+			output.Truncate(c.LastMessage, 30),
+			unreadStr,
+		})
+	}
+
+	output.Table(w, color, header, rows)
+}
+
+// Message represents an individual message in a chat conversation.
+type Message struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	SenderID       string `json:"sender_id"`
+	SenderName     string `json:"sender_name"`
+	Text           string `json:"text"`
+	SentAt         string `json:"sent_at"`
+	FromMe         bool   `json:"from_me"`
+}
+
+// ConversationDetails contains full message history for a conversation thread.
+type ConversationDetails struct {
+	Conversation Conversation `json:"conversation"`
+	Messages     []Message    `json:"messages"`
+}
+
+// Pretty prints the full conversation history.
+func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
+	c := cd.Conversation
+	if color {
+		fmt.Fprintf(w, "\x1b[1mConversación #%s con %s\x1b[0m\n", c.ID, c.UserName)
+	} else {
+		fmt.Fprintf(w, "Conversación #%s con %s\n", c.ID, c.UserName)
+	}
+	fmt.Fprintf(w, "Anuncio: %s (%.0f €) [ID: %s]\n\n", c.AdTitle, c.AdPrice, c.AdID)
+
+	if len(cd.Messages) == 0 {
+		fmt.Fprintln(w, "No messages in this conversation yet.")
+		return
+	}
+
+	for _, m := range cd.Messages {
+		sender := m.SenderName
+		if m.FromMe {
+			sender = "Tú"
+		}
+
+		if color {
+			if m.FromMe {
+				fmt.Fprintf(w, "\x1b[34m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, m.Text)
+			} else {
+				fmt.Fprintf(w, "\x1b[32m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, m.Text)
+			}
+		} else {
+			fmt.Fprintf(w, "[%s] %s: %s\n", m.SentAt, sender, m.Text)
+		}
+	}
+}
