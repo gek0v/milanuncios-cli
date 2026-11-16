@@ -23,13 +23,14 @@ const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 
 // Client interacts with the Milanuncios web endpoints and private API.
 type Client struct {
-	BaseURL   string
-	UserAgent string
-	HTTP      *http.Client
-	Proxy     string
-	Debug     io.Writer
-	Notice    func(string)
-	OnBlock   func(ctx context.Context)
+	BaseURL      string
+	UserAgent    string
+	SessionToken string
+	HTTP         *http.Client
+	Proxy        string
+	Debug        io.Writer
+	Notice       func(string)
+	OnBlock      func(ctx context.Context)
 
 	redactStrings []string
 	uaMu          sync.Mutex
@@ -48,6 +49,12 @@ func NewClient(version string) *Client {
 			Timeout: 15 * time.Second,
 		},
 	}
+}
+
+// SetSession configures the active bearer/cookie session token and redacts it from logs.
+func (c *Client) SetSession(token string) {
+	c.SessionToken = token
+	c.Redact(token)
 }
 
 // Redact registers a string to be replaced with [REDACTED] in debug logs.
@@ -112,7 +119,17 @@ func (c *Client) debugf(format string, args ...any) {
 	}
 }
 
-func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values, out any) error {
+func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values, auth bool, out any) error {
+	endpoint := method + " " + path
+
+	if auth && c.SessionToken == "" {
+		return &output.DomainError{
+			Kind:     output.KindAuth,
+			Endpoint: endpoint,
+			Msg:      "this command requires an authenticated profile. Run `milanuncios auth login`",
+		}
+	}
+
 	u := strings.TrimRight(c.BaseURL, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -125,10 +142,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		}
 		req.Header.Set("User-Agent", c.currentUA())
 		req.Header.Set("Accept", "application/json")
+		if auth && c.SessionToken != "" {
+			req.Header.Set("Authorization", "Bearer "+c.SessionToken)
+			req.Header.Set("Cookie", "token="+c.SessionToken)
+		}
 		return req, nil
 	}
 
-	endpoint := method + " " + path
 	c.debugf("> %s %s", method, c.redact(u))
 
 	req, err := buildReq()
@@ -182,6 +202,15 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 			Body:      c.snippet(raw),
 			Retryable: true,
 			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
+		}
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return &output.DomainError{
+			Kind:     output.KindAuth,
+			Status:   resp.StatusCode,
+			Endpoint: endpoint,
+			Msg:      "milanuncios rejected session token. Run `milanuncios auth login` again",
 		}
 	}
 
@@ -295,7 +324,7 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 	}
 
 	var res SearchResult
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/search", params, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/search", params, false, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -304,7 +333,7 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 // ListCategories retrieves the category taxonomy tree.
 func (c *Client) ListCategories(ctx context.Context) (CategoryListResult, error) {
 	var cats CategoryListResult
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/categories", nil, &cats); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/categories", nil, false, &cats); err != nil {
 		return nil, err
 	}
 	return cats, nil
@@ -318,7 +347,7 @@ func (c *Client) GetCategoryFilters(ctx context.Context, categoryID int) (*Categ
 
 	path := fmt.Sprintf("/api/v1/categories/%d/filters", categoryID)
 	var res CategoryFiltersResult
-	if err := c.doRequest(ctx, http.MethodGet, path, nil, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, path, nil, false, &res); err != nil {
 		return nil, err
 	}
 	if res.CategoryID == 0 {
@@ -328,8 +357,8 @@ func (c *Client) GetCategoryFilters(ctx context.Context, categoryID int) (*Categ
 }
 
 var (
-	adURLRegex     = regexp.MustCompile(`[-/rR]([0-9]{6,12})(?:\.htm)?(?:[/?#]|$)`)
-	adNumericRegex = regexp.MustCompile(`^[rR]?([0-9]{6,12})$`)
+	adURLRegex     = regexp.MustCompile(`[-/rR]([0-9]{1,15})(?:\.htm)?(?:[/?#]|$)`)
+	adNumericRegex = regexp.MustCompile(`^[rR]?([0-9]{1,15})$`)
 )
 
 // ExtractAdID parses an ad ID from either a numeric string or full Milanuncios URL.
@@ -358,7 +387,7 @@ func (c *Client) GetAd(ctx context.Context, idOrURL string) (*AdItem, error) {
 	}
 
 	var item AdItem
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/ads/"+id, nil, &item); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/ads/"+id, nil, false, &item); err != nil {
 		return nil, err
 	}
 
@@ -370,4 +399,115 @@ func (c *Client) GetAd(ctx context.Context, idOrURL string) (*AdItem, error) {
 	}
 
 	return &item, nil
+}
+
+// Me retrieves the authenticated user's account profile.
+func (c *Client) Me(ctx context.Context) (*UserProfile, error) {
+	var profile UserProfile
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me", nil, true, &profile); err != nil {
+		return nil, err
+	}
+	return &profile, nil
+}
+
+// MyAds returns listings published by the authenticated user.
+func (c *Client) MyAds(ctx context.Context, sold bool) ([]AdItem, error) {
+	params := url.Values{}
+	if sold {
+		params.Set("status", "sold")
+	}
+	var res []AdItem
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/ads", params, true, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// MyFavorites returns listings marked as favorites by the user.
+func (c *Client) MyFavorites(ctx context.Context) ([]AdItem, error) {
+	var res []AdItem
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/favorites", nil, true, &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// Favorite marks an ad as favorite.
+func (c *Client) Favorite(ctx context.Context, adID string) error {
+	id, err := ExtractAdID(adID)
+	if err != nil {
+		return err
+	}
+	return c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, true, nil)
+}
+
+// Unfavorite removes an ad from favorites.
+func (c *Client) Unfavorite(ctx context.Context, adID string) error {
+	id, err := ExtractAdID(adID)
+	if err != nil {
+		return err
+	}
+	return c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, true, nil)
+}
+
+// ParseCookies extracts the session token from browser export formats:
+// JSON (Cookie-Editor, EditThisCookie), Netscape/curl cookies.txt, or raw Cookie header.
+func ParseCookies(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", output.Usagef("cookies input is empty")
+	}
+
+	// 1. Try parsing JSON format (Cookie-Editor / EditThisCookie)
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		var cookies []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &cookies); err == nil && len(cookies) > 0 {
+			for _, ck := range cookies {
+				lower := strings.ToLower(ck.Name)
+				if lower == "token" || lower == "session" || lower == "adevinta_session" || lower == "jwt" || lower == "session_token" {
+					if ck.Value != "" {
+						return ck.Value, nil
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Try parsing Netscape cookies.txt lines
+	lines := strings.Split(trimmed, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 7 {
+			name := strings.ToLower(parts[5])
+			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
+				return parts[6], nil
+			}
+		}
+	}
+
+	// 3. Try parsing standard HTTP Cookie: name=val; name2=val2
+	for _, part := range strings.Split(trimmed, ";") {
+		part = strings.TrimSpace(part)
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) == 2 {
+			name := strings.ToLower(strings.TrimSpace(kv[0]))
+			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
+				return strings.TrimSpace(kv[1]), nil
+			}
+		}
+	}
+
+	// 4. Fallback: if raw is a pure token string without spaces/semicolons
+	if !strings.ContainsAny(trimmed, " \t\r\n;") && len(trimmed) > 10 {
+		return trimmed, nil
+	}
+
+	return "", output.Usagef("could not find session cookie (token/session/adevinta_session) in provided data")
 }

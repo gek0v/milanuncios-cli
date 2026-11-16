@@ -20,6 +20,8 @@ func (a *App) adCmd() *cobra.Command {
 		a.adShowCmd(),
 		a.adImagesCmd(),
 		a.adOpenCmd(),
+		a.adFavoriteCmd(),
+		a.adUnfavoriteCmd(),
 	)
 
 	return cmd
@@ -82,6 +84,42 @@ func (a *App) adOpenCmd() *cobra.Command {
 			return a.Printer.Print(map[string]string{
 				"status": "opened",
 				"url":    item.URL,
+			})
+		},
+	}
+}
+
+func (a *App) adFavoriteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "favorite <id|url>",
+		Short: "Add an ad to your account favorites",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.Client.Favorite(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			id, _ := milanuncios.ExtractAdID(args[0])
+			return a.Printer.Print(map[string]string{
+				"status": "favorited",
+				"ad_id":  id,
+			})
+		},
+	}
+}
+
+func (a *App) adUnfavoriteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unfavorite <id|url>",
+		Short: "Remove an ad from your account favorites",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.Client.Unfavorite(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			id, _ := milanuncios.ExtractAdID(args[0])
+			return a.Printer.Print(map[string]string{
+				"status": "unfavorited",
+				"ad_id":  id,
 			})
 		},
 	}

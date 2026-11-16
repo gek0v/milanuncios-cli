@@ -82,9 +82,12 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 	_ = root.RegisterFlagCompletionFunc("error-format", cobra.FixedCompletions([]string{"text", "json"}, cobra.ShellCompDirectiveNoFileComp))
 
 	root.AddCommand(
+		a.authCmd(),
+		a.profileCmd(),
 		a.searchCmd(),
 		a.categoryCmd(),
 		a.adCmd(),
+		a.meCmd(),
 		a.configCmd(),
 	)
 
@@ -130,6 +133,18 @@ func (a *App) setup(cmd *cobra.Command) error {
 	}
 	a.Client.Notice = func(s string) {
 		fmt.Fprintln(a.Stderr, "milanuncios: "+s)
+	}
+
+	// 1. Env override for CI or ephemeral automation
+	if envToken := os.Getenv("MILANUNCIOS_SESSION_TOKEN"); envToken != "" {
+		a.Client.SetSession(envToken)
+	} else {
+		// 2. Load persisted credentials for profile
+		if creds, err := config.LoadCredentials(a.Paths.CredentialsFile); err == nil {
+			if p, ok := creds.Profiles[a.Profile]; ok && p.SessionToken != "" {
+				a.Client.SetSession(p.SessionToken)
+			}
+		}
 	}
 
 	proxyStr := os.Getenv("MILANUNCIOS_PROXY")
