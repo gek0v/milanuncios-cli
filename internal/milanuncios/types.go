@@ -255,3 +255,43 @@ func (r *SearchResult) Pretty(w io.Writer, color bool) {
 		fmt.Fprintf(w, "\nNext page cursor: %s (pass --next %s to fetch next page)\n", r.NextPage, r.NextPage)
 	}
 }
+
+// UserProfile represents the authenticated user's account details.
+type UserProfile struct {
+	ID        string  `json:"id"`
+	Hash      string  `json:"hash,omitempty"`
+	Name      string  `json:"name"`
+	Email     string  `json:"email,omitempty"`
+	Phone     string  `json:"phone,omitempty"`
+	Verified  bool    `json:"verified"`
+	Reviews   int     `json:"reviews_count"`
+	Rating    float64 `json:"rating"`
+	CreatedAt string  `json:"created_at,omitempty"`
+}
+
+// Pretty prints the user account profile.
+func (u *UserProfile) Pretty(w io.Writer, color bool) {
+	if color {
+		fmt.Fprintf(w, "\x1b[1m%s\x1b[0m\n", u.Name)
+	} else {
+		fmt.Fprintf(w, "%s\n", u.Name)
+	}
+	fmt.Fprintf(w, "ID: %s\n", u.ID)
+	if u.Email != "" {
+		fmt.Fprintf(w, "Email: %s\n", u.Email)
+	}
+	if u.Phone != "" {
+		fmt.Fprintf(w, "Teléfono: %s\n", u.Phone)
+	}
+	ver := "No verificado"
+	if u.Verified {
+		ver = "Verificado"
+	}
+	fmt.Fprintf(w, "Estado: %s\n", ver)
+	if u.Reviews > 0 {
+		fmt.Fprintf(w, "Valoraciones: %.1f ★ (%d opiniones)\n", u.Rating, u.Reviews)
+	}
+	if u.CreatedAt != "" {
+		fmt.Fprintf(w, "Miembro desde: %s\n", u.CreatedAt)
+	}
+}

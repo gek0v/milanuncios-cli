@@ -446,3 +446,179 @@ func TestExecuteExitCodes(t *testing.T) {
 		t.Fatalf("expected error message on stderr, got: %s", stderr.String())
 	}
 }
+
+func TestAuthAndProfileCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials.toml")
+	t.Setenv("MILANUNCIOS_CREDENTIALS_FILE", credFile)
+	t.Setenv("MILANUNCIOS_SESSION_TOKEN", "")
+
+	// 1. auth status when not logged in
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"auth", "status", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("auth status failed: %v", err)
+		}
+		var res map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode auth status json: %v", err)
+		}
+		if res["logged_in"] != false {
+			t.Fatalf("expected logged_in: false, got: %v", res["logged_in"])
+		}
+	}
+
+	// 2. profile list when empty
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"profile", "list", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("profile list failed: %v", err)
+		}
+	}
+}
+
+func TestMeAndFavoriteCommands(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer valid-test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+
+		switch {
+		case r.URL.Path == "/api/v1/me":
+			user := milanuncios.UserProfile{
+				ID:       "usr-99",
+				Name:     "Ana López",
+				Email:    "ana@example.com",
+				Phone:    "600112233",
+				Verified: true,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(user)
+
+		case r.URL.Path == "/api/v1/me/favorites" && r.Method == http.MethodGet:
+			favs := []milanuncios.AdItem{
+				{
+					ID:    "777",
+					Title: "Mesa de centro vintage",
+					Price: 80,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(favs)
+
+		case r.URL.Path == "/api/v1/ads/777/favorite" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+
+		case r.URL.Path == "/api/v1/ads/777/favorite" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	t.Setenv("MILANUNCIOS_SESSION_TOKEN", "valid-test-token")
+
+	// 1. me show
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"me", "show", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("me show failed: %v", err)
+		}
+		var user milanuncios.UserProfile
+		if err := json.Unmarshal(stdout.Bytes(), &user); err != nil {
+			t.Fatalf("failed to decode user profile: %v", err)
+		}
+		if user.Name != "Ana López" {
+			t.Fatalf("unexpected user name: %s", user.Name)
+		}
+	}
+
+	// 2. me favorites
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"me", "favorites", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("me favorites failed: %v", err)
+		}
+		var favs []milanuncios.AdItem
+		if err := json.Unmarshal(stdout.Bytes(), &favs); err != nil {
+			t.Fatalf("failed to decode favorites: %v", err)
+		}
+		if len(favs) != 1 || favs[0].ID != "777" {
+			t.Fatalf("unexpected favorites: %+v", favs)
+		}
+	}
+
+	// 3. ad favorite & unfavorite
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"ad", "favorite", "777", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("ad favorite failed: %v", err)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		cmd = app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"ad", "unfavorite", "777", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("ad unfavorite failed: %v", err)
+		}
+	}
+}

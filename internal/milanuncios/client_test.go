@@ -428,3 +428,120 @@ func TestSearchWithFilters(t *testing.T) {
 		t.Fatalf("expected 1 item, got %d", len(res.Items))
 	}
 }
+
+func TestParseCookies(t *testing.T) {
+	// JSON format (Cookie-Editor)
+	jsonCookies := `[
+		{"name": "other_cookie", "value": "123"},
+		{"name": "token", "value": "jwt-session-token-abc"}
+	]`
+	tok, err := milanuncios.ParseCookies(jsonCookies)
+	if err != nil || tok != "jwt-session-token-abc" {
+		t.Fatalf("expected 'jwt-session-token-abc', got %q (err: %v)", tok, err)
+	}
+
+	// Netscape format
+	netscapeCookies := `# Netscape HTTP Cookie File
+.milanuncios.com	TRUE	/	TRUE	1799999999	session	session-token-xyz
+`
+	tok, err = milanuncios.ParseCookies(netscapeCookies)
+	if err != nil || tok != "session-token-xyz" {
+		t.Fatalf("expected 'session-token-xyz', got %q (err: %v)", tok, err)
+	}
+
+	// Raw Cookie header format
+	headerCookies := "other=abc; adevinta_session=adevinta-secret-999; foo=bar"
+	tok, err = milanuncios.ParseCookies(headerCookies)
+	if err != nil || tok != "adevinta-secret-999" {
+		t.Fatalf("expected 'adevinta-secret-999', got %q (err: %v)", tok, err)
+	}
+
+	// Direct token
+	tok, err = milanuncios.ParseCookies("directtoken123456789")
+	if err != nil || tok != "directtoken123456789" {
+		t.Fatalf("expected 'directtoken123456789', got %q (err: %v)", tok, err)
+	}
+
+	// Invalid empty
+	_, err = milanuncios.ParseCookies("   ")
+	if err == nil {
+		t.Fatal("expected error on empty cookies, got nil")
+	}
+}
+
+func TestClientAuthMeAndFavorites(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer valid-token-123" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/api/v1/me":
+			me := milanuncios.UserProfile{
+				ID:       "user-777",
+				Name:     "Laura Gómez",
+				Email:    "laura@example.com",
+				Verified: true,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(me)
+
+		case "/api/v1/me/favorites":
+			favs := []milanuncios.AdItem{
+				{ID: "888", Title: "Mesa comedor", Price: 70},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(favs)
+
+		case "/api/v1/ads/888/favorite":
+			if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	// 1. Unauthenticated Me should fail
+	_, err := client.Me(context.Background())
+	if err == nil {
+		t.Fatal("expected auth error when unauthenticated, got nil")
+	}
+
+	// 2. Set valid session
+	client.SetSession("valid-token-123")
+
+	me, err := client.Me(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error fetching Me: %v", err)
+	}
+	if me.Name != "Laura Gómez" || me.Email != "laura@example.com" {
+		t.Fatalf("unexpected profile: %+v", me)
+	}
+
+	// 3. Test MyFavorites
+	favs, err := client.MyFavorites(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error fetching favorites: %v", err)
+	}
+	if len(favs) != 1 || favs[0].ID != "888" {
+		t.Fatalf("unexpected favorites: %+v", favs)
+	}
+
+	// 4. Test Favorite and Unfavorite
+	if err := client.Favorite(context.Background(), "888"); err != nil {
+		t.Fatalf("unexpected error in Favorite: %v", err)
+	}
+	if err := client.Unfavorite(context.Background(), "888"); err != nil {
+		t.Fatalf("unexpected error in Unfavorite: %v", err)
+	}
+}
