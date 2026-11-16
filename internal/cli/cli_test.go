@@ -3,12 +3,15 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
+	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 )
 
 func TestCommandTree(t *testing.T) {
@@ -230,6 +233,53 @@ func TestConfigCommands(t *testing.T) {
 		if !strings.Contains(stdout.String(), "socks5h://127.0.0.1:9050") {
 			t.Fatalf("expected proxy in config list, got: %s", stdout.String())
 		}
+	}
+}
+
+func TestSearchCommand(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		res := milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{
+				{
+					ID:    "3003",
+					Title: "Guitarra española",
+					Price: 150,
+					Location: milanuncios.AdLocation{
+						Province: "Sevilla",
+					},
+					Seller: milanuncios.AdSeller{
+						Name: "Manuel",
+					},
+				},
+			},
+			Total: 1,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	app := cli.NewApp("test")
+	app.Client.BaseURL = ts.URL
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"search", "guitarra", "--province", "Sevilla", "--format", "json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("search command failed: %v", err)
+	}
+
+	var parsed milanuncios.SearchResult
+	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+		t.Fatalf("failed to decode search json output: %v", err)
+	}
+	if len(parsed.Items) != 1 || parsed.Items[0].Title != "Guitarra española" {
+		t.Fatalf("unexpected search items in output: %+v", parsed.Items)
 	}
 }
 

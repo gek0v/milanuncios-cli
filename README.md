@@ -25,7 +25,7 @@ El desarrollo del proyecto se ejecutará mediante incrementos atómicos con regi
 
 - [x] **Slice 0**: Infraestructura base, tooling, esqueleto del CLI con Cobra y CI.
 - [x] **Slice 1**: Contrato de I/O (JSON, Pretty, JSONL, TOON), clasificador de errores y configuración TOML en XDG.
-- [ ] **Slice 2**: Cliente HTTP para Milanuncios y comando de búsqueda pública (`search`).
+- [x] **Slice 2**: Cliente HTTP para Milanuncios y comando de búsqueda pública (`search`).
 - [ ] **Slice 3**: Inspección detallada de anuncios (`ad show`), imágenes y apertura en navegador.
 - [ ] **Slice 4**: Taxonomía de categorías y filtros específicos (`category list`, `--filter clave=valor`).
 - [ ] **Slice 5**: Autenticación web segura por cookies, gestión de perfiles (`auth login`, `me`).
