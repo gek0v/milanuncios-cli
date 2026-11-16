@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -293,4 +294,49 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 		return nil, err
 	}
 	return &res, nil
+}
+
+var (
+	adURLRegex     = regexp.MustCompile(`[-/rR]([0-9]{6,12})(?:\.htm)?(?:[/?#]|$)`)
+	adNumericRegex = regexp.MustCompile(`^[rR]?([0-9]{6,12})$`)
+)
+
+// ExtractAdID parses an ad ID from either a numeric string or full Milanuncios URL.
+func ExtractAdID(idOrURL string) (string, error) {
+	trimmed := strings.TrimSpace(idOrURL)
+	if trimmed == "" {
+		return "", output.Usagef("ad ID or URL cannot be empty")
+	}
+
+	if m := adNumericRegex.FindStringSubmatch(trimmed); len(m) > 1 {
+		return m[1], nil
+	}
+
+	if m := adURLRegex.FindStringSubmatch(trimmed); len(m) > 1 {
+		return m[1], nil
+	}
+
+	return "", output.Usagef("could not extract ad ID from %q (expected numeric ID or Milanuncios URL)", idOrURL)
+}
+
+// GetAd fetches full details of a listing by its ID or web URL.
+func (c *Client) GetAd(ctx context.Context, idOrURL string) (*AdItem, error) {
+	id, err := ExtractAdID(idOrURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var item AdItem
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/ads/"+id, nil, &item); err != nil {
+		return nil, err
+	}
+
+	if item.ID == "" {
+		item.ID = id
+	}
+	if item.URL == "" {
+		item.URL = fmt.Sprintf("https://www.milanuncios.com/anuncios/%s.htm", id)
+	}
+
+	return &item, nil
 }

@@ -283,6 +283,78 @@ func TestSearchCommand(t *testing.T) {
 	}
 }
 
+func TestAdCommands(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ads/492817294" {
+			item := milanuncios.AdItem{
+				ID:    "492817294",
+				Title: "Mesa de centro",
+				Price: 40,
+				Photos: []string{
+					"https://img.milanuncios.com/1.jpg",
+					"https://img.milanuncios.com/2.jpg",
+				},
+				URL: "https://www.milanuncios.com/anuncios/492817294.htm",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(item)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	// Test ad show
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"ad", "show", "492817294", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("ad show failed: %v", err)
+		}
+		var parsed milanuncios.AdItem
+		if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed to decode ad show output: %v", err)
+		}
+		if parsed.Title != "Mesa de centro" {
+			t.Fatalf("unexpected title: %s", parsed.Title)
+		}
+	}
+
+	// Test item alias and ad images
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"item", "images", "492817294", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("item images failed: %v", err)
+		}
+		var parsed milanuncios.ImagesResult
+		if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed to decode images output: %v", err)
+		}
+		if len(parsed.Photos) != 2 {
+			t.Fatalf("expected 2 photos, got %d", len(parsed.Photos))
+		}
+	}
+}
+
 func TestExecuteExitCodes(t *testing.T) {
 	app := cli.NewApp("test")
 	var stdout, stderr bytes.Buffer

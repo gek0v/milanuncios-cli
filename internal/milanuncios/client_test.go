@@ -193,3 +193,95 @@ func TestClientErrors(t *testing.T) {
 		tsBad.Close()
 	}
 }
+
+func TestExtractAdID(t *testing.T) {
+	tests := []struct {
+		input       string
+		expectedID  string
+		expectError bool
+	}{
+		{"492817294", "492817294", false},
+		{"r492817294", "492817294", false},
+		{"R492817294", "492817294", false},
+		{"https://www.milanuncios.com/bicicletas/bicicleta-montana-492817294.htm", "492817294", false},
+		{"https://www.milanuncios.com/anuncios/492817294.htm", "492817294", false},
+		{"https://www.milanuncios.com/anuncios/492817294", "492817294", false},
+		{"invalid-no-id", "", true},
+		{"", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			id, err := milanuncios.ExtractAdID(tt.input)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error for input %q, got nil", tt.input)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for input %q: %v", tt.input, err)
+				}
+				if id != tt.expectedID {
+					t.Fatalf("expected ID %q, got %q", tt.expectedID, id)
+				}
+			}
+		})
+	}
+}
+
+func TestClientGetAd(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/ads/492817294" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		item := milanuncios.AdItem{
+			ID:          "492817294",
+			Title:       "Sofá Chaiselongue 3 plazas",
+			Description: "Sofá en muy buen estado, tela antimanchas.",
+			Price:       250,
+			Currency:    "€",
+			Location: milanuncios.AdLocation{
+				Province:     "Valencia",
+				Municipality: "Gandia",
+			},
+			Seller: milanuncios.AdSeller{
+				Name: "Elena",
+				Type: "particular",
+			},
+			Photos: []string{
+				"https://img.milanuncios.com/photos/1.jpg",
+				"https://img.milanuncios.com/photos/2.jpg",
+			},
+			URL: "https://www.milanuncios.com/anuncios/492817294.htm",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(item)
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	item, err := client.GetAd(context.Background(), "492817294")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if item.Title != "Sofá Chaiselongue 3 plazas" {
+		t.Errorf("unexpected title: %s", item.Title)
+	}
+	if len(item.Photos) != 2 {
+		t.Errorf("expected 2 photos, got %d", len(item.Photos))
+	}
+
+	var buf bytes.Buffer
+	item.Pretty(&buf, false)
+	out := buf.String()
+	if !strings.Contains(out, "Sofá Chaiselongue") || !strings.Contains(out, "Gandia (Valencia)") {
+		t.Errorf("expected pretty output to contain item details, got: %s", out)
+	}
+}
