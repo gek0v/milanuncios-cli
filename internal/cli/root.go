@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
+	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -28,6 +31,7 @@ type App struct {
 	Profile     string
 	Printer     output.Printer
 	Interactive bool
+	Client      *milanuncios.Client
 }
 
 // NewApp creates a new App instance with default standard I/O streams.
@@ -37,6 +41,7 @@ func NewApp(version string) *App {
 		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
+		Client:  milanuncios.NewClient(version),
 	}
 }
 
@@ -77,6 +82,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 	_ = root.RegisterFlagCompletionFunc("error-format", cobra.FixedCompletions([]string{"text", "json"}, cobra.ShellCompDirectiveNoFileComp))
 
 	root.AddCommand(
+		a.searchCmd(),
 		a.configCmd(),
 	)
 
@@ -113,6 +119,28 @@ func (a *App) setup(cmd *cobra.Command) error {
 	}
 	a.Cfg = cfg
 	a.Profile = config.ResolveProfile(a.FlagProfile, a.Cfg)
+
+	if a.Client == nil {
+		a.Client = milanuncios.NewClient(a.Version)
+	}
+	if a.FlagDebug {
+		a.Client.Debug = a.Stderr
+	}
+	a.Client.Notice = func(s string) {
+		fmt.Fprintln(a.Stderr, "milanuncios: "+s)
+	}
+
+	proxyStr := os.Getenv("MILANUNCIOS_PROXY")
+	if proxyStr == "" && a.Cfg.Proxy != "" {
+		proxyStr = a.Cfg.Proxy
+	}
+	if proxyStr != "" {
+		u, err := url.Parse(proxyStr)
+		if err != nil {
+			return output.Usagef("invalid proxy %q: %v", proxyStr, err)
+		}
+		a.Client.UseProxy(u)
+	}
 
 	return nil
 }
