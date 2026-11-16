@@ -856,3 +856,53 @@ url = "%s"
 		}
 	}
 }
+
+func TestMCPAndSkillsCommands(t *testing.T) {
+	// 1. skills get
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"skills", "get", "milanuncios-usage"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("skills get failed: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "Milanuncios CLI Agent Guide") {
+			t.Fatalf("expected skill guide in output, got: %s", stdout.String())
+		}
+	}
+
+	// 2. mcp install cursor
+	{
+		tmpHome := t.TempDir()
+		t.Setenv("USERPROFILE", tmpHome)
+		t.Setenv("HOME", tmpHome)
+
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"mcp", "install", "cursor", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("mcp install cursor failed: %v", err)
+		}
+		var res map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode install json: %v", err)
+		}
+		if res["status"] != "installed" || res["client"] != "cursor" {
+			t.Fatalf("unexpected install result: %+v", res)
+		}
+	}
+}
