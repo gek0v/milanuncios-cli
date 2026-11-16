@@ -285,3 +285,146 @@ func TestClientGetAd(t *testing.T) {
 		t.Errorf("expected pretty output to contain item details, got: %s", out)
 	}
 }
+
+func TestListCategories(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/categories" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		cats := milanuncios.CategoryListResult{
+			{
+				ID:   10,
+				Name: "Motor",
+				Slug: "motor",
+				Children: []milanuncios.Category{
+					{ID: 11, Name: "Coches", Slug: "coches-segunda-mano"},
+					{ID: 12, Name: "Motos", Slug: "motos-segunda-mano"},
+				},
+			},
+			{
+				ID:   20,
+				Name: "Inmobiliaria",
+				Slug: "inmobiliaria",
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cats)
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	cats, err := client.ListCategories(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(cats) != 2 {
+		t.Fatalf("expected 2 root categories, got %d", len(cats))
+	}
+	if len(cats[0].Children) != 2 {
+		t.Fatalf("expected 2 subcategories in Motor, got %d", len(cats[0].Children))
+	}
+
+	var buf bytes.Buffer
+	cats.Pretty(&buf, false)
+	out := buf.String()
+	if !strings.Contains(out, "Motor") || !strings.Contains(out, "Coches") {
+		t.Errorf("expected pretty output to contain category names, got: %s", out)
+	}
+}
+
+func TestGetCategoryFilters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/categories/10/filters" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		res := milanuncios.CategoryFiltersResult{
+			CategoryID:   10,
+			CategoryName: "Motor",
+			Filters: []milanuncios.FilterDefinition{
+				{
+					Key:     "brand",
+					Label:   "Marca",
+					Type:    "select",
+					Options: []string{"BMW", "Audi", "Toyota"},
+				},
+				{
+					Key:   "fuel",
+					Label: "Combustible",
+					Type:  "select",
+				},
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	res, err := client.GetCategoryFilters(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if res.CategoryID != 10 || len(res.Filters) != 2 {
+		t.Fatalf("unexpected filters result: %+v", res)
+	}
+
+	var buf bytes.Buffer
+	res.Pretty(&buf, false)
+	out := buf.String()
+	if !strings.Contains(out, "brand") || !strings.Contains(out, "BMW") {
+		t.Errorf("expected pretty output to contain filter keys, got: %s", out)
+	}
+}
+
+func TestSearchWithFilters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filter[brand]") != "Toyota" {
+			t.Errorf("expected filter[brand]=Toyota, got: %s", r.URL.Query().Get("filter[brand]"))
+		}
+		if r.URL.Query().Get("filter[fuel]") != "diesel" {
+			t.Errorf("expected filter[fuel]=diesel, got: %s", r.URL.Query().Get("filter[fuel]"))
+		}
+
+		res := milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{
+				{ID: "5005", Title: "Toyota Auris Diesel", Price: 7500},
+			},
+			Total: 1,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	res, err := client.Search(context.Background(), milanuncios.SearchQuery{
+		Keywords: "auris",
+		Category: 10,
+		Filters: map[string]string{
+			"brand": "Toyota",
+			"fuel":  "diesel",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(res.Items))
+	}
+}

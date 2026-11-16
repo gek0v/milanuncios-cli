@@ -355,6 +355,82 @@ func TestAdCommands(t *testing.T) {
 	}
 }
 
+func TestCategoryAndFilterCommands(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/categories":
+			cats := milanuncios.CategoryListResult{
+				{ID: 10, Name: "Motor", Slug: "motor"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cats)
+		case "/api/v1/categories/10/filters":
+			filters := milanuncios.CategoryFiltersResult{
+				CategoryID:   10,
+				CategoryName: "Motor",
+				Filters: []milanuncios.FilterDefinition{
+					{Key: "brand", Label: "Marca", Type: "select"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(filters)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	// Test category list
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"category", "list", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("category list failed: %v", err)
+		}
+		var parsed milanuncios.CategoryListResult
+		if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed to decode category list output: %v", err)
+		}
+		if len(parsed) != 1 || parsed[0].Name != "Motor" {
+			t.Fatalf("unexpected category list: %+v", parsed)
+		}
+	}
+
+	// Test search filters
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"search", "filters", "--category", "10", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("search filters failed: %v", err)
+		}
+		var parsed milanuncios.CategoryFiltersResult
+		if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed to decode filters output: %v", err)
+		}
+		if len(parsed.Filters) != 1 || parsed.Filters[0].Key != "brand" {
+			t.Fatalf("unexpected filters: %+v", parsed)
+		}
+	}
+}
+
 func TestExecuteExitCodes(t *testing.T) {
 	app := cli.NewApp("test")
 	var stdout, stderr bytes.Buffer
