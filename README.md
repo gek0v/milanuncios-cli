@@ -33,7 +33,7 @@ El desarrollo del proyecto se ejecutará mediante incrementos atómicos con regi
 - [x] **Slice 7**: Canales de notificación (`sinks`: ntfy, webhooks, exec).
 - [x] **Slice 8**: Servidor MCP (*Model Context Protocol*) para Agentes de IA.
 - [x] **Slice 9**: Mensajería y chat.
-- [ ] **Slice 10**: Sitio web de documentación, generador de referencia y empaquetado multiplataforma.
+- [x] **Slice 10**: Sitio web de documentación, generador de referencia y empaquetado multiplataforma.
 
 ---
 
