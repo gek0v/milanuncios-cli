@@ -24,7 +24,7 @@ La investigación exhaustiva del funcionamiento y arquitectura de referencia se 
 El desarrollo del proyecto se ejecutará mediante incrementos atómicos con registro en commits semánticos y PRs pequeños:
 
 - [x] **Slice 0**: Infraestructura base, tooling, esqueleto del CLI con Cobra y CI.
-- [ ] **Slice 1**: Contrato de I/O (JSON, Pretty, JSONL, TOON), clasificador de errores y configuración TOML en XDG.
+- [x] **Slice 1**: Contrato de I/O (JSON, Pretty, JSONL, TOON), clasificador de errores y configuración TOML en XDG.
 - [ ] **Slice 2**: Cliente HTTP para Milanuncios y comando de búsqueda pública (`search`).
 - [ ] **Slice 3**: Inspección detallada de anuncios (`ad show`), imágenes y apertura en navegador.
 - [ ] **Slice 4**: Taxonomía de categorías y filtros específicos (`category list`, `--filter clave=valor`).

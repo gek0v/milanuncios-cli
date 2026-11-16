@@ -1,10 +1,11 @@
 package cli
 
 import (
-	"fmt"
 	"io"
 	"os"
 
+	"github.com/gek0v/milanuncios-cli/internal/config"
+	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +22,12 @@ type App struct {
 	FlagErrorFormat string
 	FlagNoInput     bool
 	FlagDebug       bool
+
+	Paths       config.Paths
+	Cfg         *config.Config
+	Profile     string
+	Printer     output.Printer
+	Interactive bool
 }
 
 // NewApp creates a new App instance with default standard I/O streams.
@@ -48,7 +55,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		SilenceErrors: true,
 		Version:       a.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return a.validateGlobalFlags()
+			return a.setup(cmd)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
@@ -69,21 +76,43 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 	_ = root.RegisterFlagCompletionFunc("format", cobra.FixedCompletions([]string{"json", "jsonl", "pretty", "toon"}, cobra.ShellCompDirectiveNoFileComp))
 	_ = root.RegisterFlagCompletionFunc("error-format", cobra.FixedCompletions([]string{"text", "json"}, cobra.ShellCompDirectiveNoFileComp))
 
+	root.AddCommand(
+		a.configCmd(),
+	)
+
 	return root
 }
 
-func (a *App) validateGlobalFlags() error {
-	switch a.FlagFormat {
-	case "json", "jsonl", "pretty", "toon":
-	default:
-		return fmt.Errorf("unknown format %q. Use json, jsonl, pretty or toon", a.FlagFormat)
+func (a *App) setup(cmd *cobra.Command) error {
+	if cmd.Name() == "help" || cmd.Name() == "completion" || (cmd.Parent() != nil && cmd.Parent().Name() == "completion") {
+		return nil
 	}
 
-	switch a.FlagErrorFormat {
-	case "text", "json":
-	default:
-		return fmt.Errorf("--error-format must be text or json, got %q", a.FlagErrorFormat)
+	format, err := output.ParseFormat(a.FlagFormat)
+	if err != nil {
+		return err
 	}
+	if a.FlagErrorFormat != "text" && a.FlagErrorFormat != "json" {
+		return output.Usagef("--error-format must be text or json, got %q", a.FlagErrorFormat)
+	}
+
+	stdoutFile, _ := a.Stdout.(*os.File)
+	stdinFile, _ := a.Stdin.(*os.File)
+	stderrFile, _ := a.Stderr.(*os.File)
+	a.Interactive = !a.FlagNoInput && output.IsTerminal(stdinFile) && output.IsTerminal(stdoutFile) && output.IsTerminal(stderrFile)
+	a.Printer = output.Printer{
+		W:      a.Stdout,
+		Format: format,
+		Color:  output.ColorEnabled(a.FlagNoColor, stdoutFile),
+	}
+
+	a.Paths = config.DefaultPaths()
+	cfg, err := config.Load(a.Paths.ConfigFile)
+	if err != nil {
+		return err
+	}
+	a.Cfg = cfg
+	a.Profile = config.ResolveProfile(a.FlagProfile, a.Cfg)
 
 	return nil
 }
@@ -95,9 +124,10 @@ func (a *App) Execute() int {
 	cmd.SetOut(a.Stdout)
 	cmd.SetErr(a.Stderr)
 
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintf(a.Stderr, "milanuncios: %s\n", err.Error())
-		return 1
+	err := cmd.Execute()
+	if err == nil {
+		return 0
 	}
-	return 0
+
+	return output.PrintError(a.Stderr, err, output.ErrorFormat(a.FlagErrorFormat), a.Version, cmd.CommandPath())
 }
