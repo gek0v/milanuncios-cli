@@ -2,6 +2,9 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -137,5 +140,111 @@ func TestValidateGlobalFlags(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.toml")
+	t.Setenv("MILANUNCIOS_CONFIG", cfgFile)
+
+	// Test config path
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"config", "path"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config path failed: %v", err)
+		}
+		var res map[string]string
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to parse json output: %v", err)
+		}
+		if res["path"] != cfgFile {
+			t.Fatalf("expected config path %q, got %q", cfgFile, res["path"])
+		}
+	}
+
+	// Test config set
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"config", "set", "proxy", "socks5h://127.0.0.1:9050"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config set failed: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "updated") {
+			t.Fatalf("expected 'updated' in output, got: %s", stdout.String())
+		}
+	}
+
+	// Test config get
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"config", "get", "proxy"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config get failed: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "socks5h://127.0.0.1:9050") {
+			t.Fatalf("expected proxy value in output, got: %s", stdout.String())
+		}
+	}
+
+	// Test config list
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"config", "list"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config list failed: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "socks5h://127.0.0.1:9050") {
+			t.Fatalf("expected proxy in config list, got: %s", stdout.String())
+		}
+	}
+}
+
+func TestExecuteExitCodes(t *testing.T) {
+	app := cli.NewApp("test")
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	os.Args = []string{"milanuncios", "--format", "invalid-format"}
+	code := app.Execute()
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for usage error, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown format") {
+		t.Fatalf("expected error message on stderr, got: %s", stderr.String())
 	}
 }
