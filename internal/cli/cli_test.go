@@ -622,3 +622,170 @@ func TestMeAndFavoriteCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestWatchCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "state.db")
+	t.Setenv("MILANUNCIOS_STATE_DB", dbPath)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		res := milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{
+				{
+					ID:    "9001",
+					Title: "Bicicleta Specialized Tarmac",
+					Price: 1200,
+				},
+			},
+			Total: 1,
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	// 1. watch add search
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "add", "search", "bicicleta carretera", "--name", "bici", "--interval", "3m", "--province", "valencia", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch add search failed: %v", err)
+		}
+		var w map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &w); err != nil {
+			t.Fatalf("failed to decode watch json: %v", err)
+		}
+		if w["name"] != "bici" || w["type"] != "search" {
+			t.Fatalf("unexpected watch: %+v", w)
+		}
+	}
+
+	// 2. watch add ad
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "add", "ad", "492817294", "--name", "mi-bici", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch add ad failed: %v", err)
+		}
+	}
+
+	// 3. watch list
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "list", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch list failed: %v", err)
+		}
+		var list []map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+			t.Fatalf("failed to decode watch list: %v", err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("expected 2 watches, got %d", len(list))
+		}
+	}
+
+	// 4. watch pause & resume
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "pause", "bici", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch pause failed: %v", err)
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		cmd = app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "resume", "bici", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch resume failed: %v", err)
+		}
+	}
+
+	// 5. watch check
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "check", "bici", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch check failed: %v", err)
+		}
+	}
+
+	// 6. watch events
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "events", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch events failed: %v", err)
+		}
+	}
+
+	// 7. watch remove
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"watch", "remove", "bici", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("watch remove failed: %v", err)
+		}
+	}
+}
