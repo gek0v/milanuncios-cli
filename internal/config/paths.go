@@ -21,9 +21,19 @@ func DefaultPaths() Paths {
 		configFile = filepath.Join(xdg.ConfigHome, "milanuncios-cli", "config.toml")
 	}
 
+	credFile := os.Getenv("MILANUNCIOS_CREDENTIALS_FILE")
+	if credFile == "" {
+		credFile = filepath.Join(xdg.ConfigHome, "milanuncios-cli", "credentials.toml")
+	}
+
+	stateDB := os.Getenv("MILANUNCIOS_STATE_DB")
+	if stateDB == "" {
+		stateDB = filepath.Join(xdg.DataHome, "milanuncios-cli", "state.db")
+	}
+
 	return Paths{
 		ConfigFile:      configFile,
-		CredentialsFile: filepath.Join(xdg.ConfigHome, "milanuncios-cli", "credentials.toml"),
-		StateDB:         filepath.Join(xdg.DataHome, "milanuncios-cli", "state.db"),
+		CredentialsFile: credFile,
+		StateDB:         stateDB,
 	}
 }

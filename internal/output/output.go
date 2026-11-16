@@ -260,6 +260,22 @@ func Usagef(format string, args ...any) error {
 	return &UsageError{Msg: fmt.Sprintf(format, args...)}
 }
 
+// NotFoundf creates a classified DomainError with KindNotFound.
+func NotFoundf(format string, args ...any) error {
+	return &DomainError{
+		Kind: KindNotFound,
+		Msg:  fmt.Sprintf(format, args...),
+	}
+}
+
+// Authf creates a classified DomainError with KindAuth.
+func Authf(format string, args ...any) error {
+	return &DomainError{
+		Kind: KindAuth,
+		Msg:  fmt.Sprintf(format, args...),
+	}
+}
+
 // Envelope is the machine-readable error JSON printed on stderr with --error-format json.
 type Envelope struct {
 	Code              int      `json:"code"`
