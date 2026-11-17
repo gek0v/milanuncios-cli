@@ -1,4 +1,93 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#dc2626"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="26" font-weight="600" fill="#ffffff">MC</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="50%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+
+    <!-- Border Glow -->
+    <linearGradient id="borderGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#059669" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0.1"/>
+    </linearGradient>
+
+    <!-- Milanuncios Brand Green Gradient -->
+    <linearGradient id="milanGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="40%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+
+    <!-- Golden Yellow Accent Gradient -->
+    <linearGradient id="accentYellow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#eab308"/>
+    </linearGradient>
+
+    <!-- Subtle Center Glow -->
+    <radialGradient id="centerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Drop Shadows -->
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Card / Squircle -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bgGrad)" filter="url(#dropShadow)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#centerGlow)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="none" stroke="url(#borderGlow)" stroke-width="2.5"/>
+
+  <!-- Terminal Top Header Bar -->
+  <g opacity="0.85">
+    <circle cx="42" cy="40" r="5" fill="#ef4444" opacity="0.8"/>
+    <circle cx="58" cy="40" r="5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="74" cy="40" r="5" fill="#10b981" opacity="0.8"/>
+    <line x1="28" y1="58" x2="228" y2="58" stroke="#334155" stroke-width="1.5" stroke-opacity="0.5"/>
+  </g>
+
+  <!-- Terminal Prompt Symbol '>' and 'M' Hybrid -->
+  <g filter="url(#dropShadow)">
+    <!-- Terminal CLI Prompt Chevron '>' fused into the left wing of 'M' -->
+    <path d="M 46 112 L 80 144 L 46 176" 
+          fill="none" 
+          stroke="url(#milanGreen)" 
+          stroke-width="14" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+
+    <!-- The Milanuncios 'M' Central & Right Geometry -->
+    <path d="M 98 176 L 98 108 L 136 150 L 174 108 L 174 176" 
+          fill="none" 
+          stroke="url(#milanGreen)" 
+          stroke-width="14" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+
+    <!-- Terminal Prompt Cursor '_' in Milanuncios Yellow -->
+    <path d="M 194 176 L 218 176" 
+          fill="none" 
+          stroke="url(#accentYellow)" 
+          stroke-width="14" 
+          stroke-linecap="round"/>
+
+    <!-- Marketplace Price Tag / Notification Radar Pin -->
+    <circle cx="206" cy="108" r="9" fill="url(#accentYellow)" filter="url(#glow)"/>
+    <circle cx="206" cy="108" r="4" fill="#ffffff"/>
+  </g>
+
+  <!-- Subtle Bottom Code Bracket / Status Accent -->
+  <path d="M 52 214 L 204 214" stroke="#1e293b" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 52 214 L 110 214" stroke="url(#milanGreen)" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
 </svg>
