@@ -1,0 +1,44 @@
+name: Milanuncios API Change
+description: Report an endpoint change, broken schema, or API failure (Exit Code 7)
+title: "[api change]: "
+labels: ["api-change", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an upstream Milanuncios API change!
+        This report helps keep `milanuncios-cli` working when Milanuncios modifies their endpoints.
+  - type: input
+    id: command
+    attributes:
+      label: Command executed
+      placeholder: "e.g. milanuncios search 'bicicleta' or milanuncios ad show 12345"
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: Endpoint affected
+      placeholder: "e.g. /api/v1/search or /api/v1/ads/12345"
+  - type: input
+    id: status
+    attributes:
+      label: HTTP Status Code
+      placeholder: "e.g. 404, 410, 500"
+  - type: textarea
+    id: details
+    attributes:
+      label: Error output or reproduction steps
+      description: Include error output or re-run with `--debug` and paste sanitized output (verify no secrets are included).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CLI Version
+      placeholder: "e.g. 0.1.0"
+  - type: input
+    id: os
+    attributes:
+      label: Operating System / Architecture
+      placeholder: "e.g. linux/amd64, darwin/arm64, windows/amd64"
