@@ -152,11 +152,12 @@ func (s *WebhookSink) Send(ctx context.Context, ev store.Event) error {
 
 	if s.tokenFile != "" {
 		tokenData, err := os.ReadFile(s.tokenFile)
-		if err == nil {
-			token := strings.TrimSpace(string(tokenData))
-			if token != "" {
-				req.Header.Set("Authorization", "Bearer "+token)
-			}
+		if err != nil {
+			return fmt.Errorf("reading webhook token_file %q: %w", s.tokenFile, err)
+		}
+		token := strings.TrimSpace(string(tokenData))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
 
@@ -196,7 +197,10 @@ func (s *ExecSink) Name() string { return s.name }
 func (s *ExecSink) Type() string { return "exec" }
 
 func (s *ExecSink) Send(ctx context.Context, ev store.Event) error {
-	cmd := exec.CommandContext(ctx, s.command[0], s.command[1:]...)
+	execCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, s.command[0], s.command[1:]...)
 	cmd.Stdin = strings.NewReader(ev.PayloadJSON)
 
 	cmd.Env = append(os.Environ(),

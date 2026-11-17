@@ -49,7 +49,7 @@ type request struct {
 
 type response struct {
 	JSONRPC string  `json:"jsonrpc"`
-	ID      any     `json:"id,omitempty"`
+	ID      any     `json:"id"`
 	Result  any     `json:"result,omitempty"`
 	Error   *rpcErr `json:"error,omitempty"`
 }
@@ -111,6 +111,15 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handleRequest(ctx context.Context, req *request) {
+	// JSON-RPC 2.0 §4.1: Notifications MUST NOT be replied to
+	if req.ID == nil {
+		return
+	}
+	if req.Method == "" || req.JSONRPC != "2.0" {
+		s.sendError(req.ID, -32600, "Invalid Request")
+		return
+	}
+
 	switch req.Method {
 	case "initialize":
 		res := map[string]any{
@@ -392,7 +401,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		}, nil
 
 	case "milanuncios_get_ad":
-		target, _ := args["id_or_url"].(string)
+		target := normalizeString(args["id_or_url"])
 		if target == "" {
 			return nil, fmt.Errorf("id_or_url is required")
 		}
@@ -481,7 +490,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			return nil, fmt.Errorf("watch engine not configured")
 		}
 
-		target, _ := args["watch"].(string)
+		target := normalizeString(args["watch"])
 		if target != "" {
 			w, err := s.Store.GetWatch(target)
 			if err != nil {
@@ -571,5 +580,22 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+func normalizeString(v any) string {
+	switch val := v.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case float64:
+		return strconv.FormatInt(int64(val), 10)
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case json.Number:
+		return val.String()
+	default:
+		return ""
 	}
 }

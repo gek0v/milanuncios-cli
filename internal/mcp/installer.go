@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +53,11 @@ func InstallTarget(target string, customBinPath string) (*InstallResult, error) 
 	// Read existing config or initialize new
 	cfgMap := make(map[string]any)
 	if data, err := os.ReadFile(targetPath); err == nil {
-		_ = json.Unmarshal(data, &cfgMap)
+		if err := json.Unmarshal(data, &cfgMap); err != nil {
+			return nil, fmt.Errorf("existing configuration %s contains invalid JSON: %w (aborting to prevent data loss)", targetPath, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reading existing config %s: %w", targetPath, err)
 	}
 
 	mcpServers, ok := cfgMap["mcpServers"].(map[string]any)
@@ -69,7 +74,7 @@ func InstallTarget(target string, customBinPath string) (*InstallResult, error) 
 		return nil, err
 	}
 
-	if err := os.WriteFile(targetPath, marshaled, 0644); err != nil {
+	if err := os.WriteFile(targetPath, marshaled, 0600); err != nil {
 		return nil, fmt.Errorf("writing agent configuration to %s: %w", targetPath, err)
 	}
 
