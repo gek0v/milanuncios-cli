@@ -36,6 +36,15 @@
 ### Desde releases binarios (Recomendado)
 Descarga el binario precompilado para tu sistema operativo (Linux, macOS, Windows en AMD64 y ARM64) desde la sección de [Releases de GitHub](https://github.com/gek0v/milanuncios-cli/releases).
 
+### Con npm o npx (Node.js)
+```bash
+# Ejecución directa sin instalación previa
+npx milanuncios-cli search "bicicleta" --format pretty
+
+# O instalación global
+npm install -g milanuncios-cli
+```
+
 ### Con Go (1.25+)
 ```bash
 go install github.com/gek0v/milanuncios-cli/cmd/milanuncios@latest

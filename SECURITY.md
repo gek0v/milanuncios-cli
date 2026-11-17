@@ -14,8 +14,7 @@ Only the latest release of `milanuncios-cli` receives security updates.
 If you discover a security vulnerability in `milanuncios-cli`, please report it responsibly:
 
 1. **Do NOT** open a public GitHub issue.
-2. Use GitHub's private vulnerability reporting feature on the repository: [Report a vulnerability](https://github.com/gek0v/milanuncios-cli/security/advisories/new).
-3. Alternatively, contact the maintainers directly via email.
+2. Use GitHub's private vulnerability reporting feature on the repository: [Report a vulnerability](https://github.com/gek0v/milanuncios-cli/security/advisories/new) to ensure secure, coordinated disclosure.
 
 Please include:
 - A description of the issue and potential impact.

@@ -73,7 +73,12 @@ func (c *Client) redact(s string) string {
 
 // UseProxy configures an HTTP/SOCKS5 proxy for all requests without direct fallback.
 func (c *Client) UseProxy(u *url.URL) {
-	c.Proxy = u.String()
+	if u.User != nil {
+		if p, ok := u.User.Password(); ok && p != "" {
+			c.Redact(p)
+		}
+	}
+	c.Proxy = u.Redacted()
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(u),
 		DialContext: (&net.Dialer{
@@ -199,7 +204,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 			Kind:      output.KindBlocked,
 			Status:    resp.StatusCode,
 			Endpoint:  endpoint,
-			Body:      c.snippet(raw),
+			Body:      c.snippet(endpoint, raw),
 			Retryable: true,
 			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
 		}
@@ -238,7 +243,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 			Kind:     output.KindGeneric,
 			Status:   resp.StatusCode,
 			Endpoint: endpoint,
-			Body:     c.snippet(raw),
+			Body:     c.snippet(endpoint, raw),
 			Msg:      fmt.Sprintf("unexpected HTTP %d from milanuncios", resp.StatusCode),
 		}
 	}
@@ -249,7 +254,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 				Kind:     output.KindAPIChanged,
 				Status:   resp.StatusCode,
 				Endpoint: endpoint,
-				Body:     "json decode: " + err.Error() + "; body: " + c.snippet(raw),
+				Body:     "json decode: " + err.Error() + "; body: " + c.snippet(endpoint, raw),
 				Msg:      "milanuncios returned an unexpected response structure",
 			}
 		}
@@ -258,7 +263,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 	return nil
 }
 
-func (c *Client) snippet(raw []byte) string {
+func (c *Client) snippet(endpoint string, raw []byte) string {
+	if strings.Contains(endpoint, "/me") || strings.Contains(endpoint, "/conversations") || strings.Contains(endpoint, "/messages") {
+		return "[redacted authenticated payload]"
+	}
 	s := strings.TrimSpace(string(raw))
 	if len(s) > 300 {
 		s = s[:300] + "…"

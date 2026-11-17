@@ -311,7 +311,7 @@ func Classify(err error, version, command string) Envelope {
 			env.SuggestedCommands = []string{"milanuncios auth status", "milanuncios auth login"}
 		case KindAPIChanged:
 			env.IssueURL = IssueURL(version, command, de)
-			env.SuggestedCommands = []string{"milanuncios doctor", "rerun with --debug"}
+			env.SuggestedCommands = []string{"rerun with --debug"}
 		case KindBlocked:
 			env.SuggestedCommands = []string{"wait 15 minutes before retrying to clear cooldown"}
 		}
@@ -338,7 +338,7 @@ func IssueURL(version, command string, e *DomainError) string {
 	if e.Status != 0 {
 		q.Set("status", fmt.Sprint(e.Status))
 	}
-	q.Set("body_excerpt", e.Body)
+	q.Set("details", e.Body)
 	return repoURL + "/issues/new?" + q.Encode()
 }
 

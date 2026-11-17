@@ -159,7 +159,7 @@ func (a *App) setup(cmd *cobra.Command) error {
 	if proxyStr != "" {
 		u, err := url.Parse(proxyStr)
 		if err != nil {
-			return output.Usagef("invalid proxy %q: %v", proxyStr, err)
+			return output.Usagef("invalid proxy configuration: %v", err)
 		}
 		a.Client.UseProxy(u)
 	}

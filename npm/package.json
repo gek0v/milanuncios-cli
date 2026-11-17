@@ -1,0 +1,32 @@
+{
+  "name": "milanuncios-cli",
+  "version": "0.1.0",
+  "description": "Autonomous CLI & Model Context Protocol (MCP) server for Milanuncios marketplace",
+  "main": "cli.cjs",
+  "bin": {
+    "milanuncios": "./cli.cjs",
+    "milanuncios-cli": "./cli.cjs"
+  },
+  "scripts": {
+    "postinstall": "node ./install.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gek0v/milanuncios-cli.git"
+  },
+  "keywords": [
+    "milanuncios",
+    "mcp",
+    "cli",
+    "marketplace",
+    "model-context-protocol",
+    "claude-code",
+    "cursor"
+  ],
+  "author": "milanuncios-cli contributors",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/gek0v/milanuncios-cli/issues"
+  },
+  "homepage": "https://github.com/gek0v/milanuncios-cli#readme"
+}

@@ -1,10 +1,30 @@
 # Binaries
 bin/
+dist/
+npm/bin/
+milanuncios
+docsgen
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# Application state, databases and credentials
+*.db
+*.sqlite
+*.sqlite3
+state.db
+config.toml
+credentials.toml
+*credentials*.toml
+cookies*.json
+cookies*.txt
+.env*
+
+# Logs
+*.log
+logs/
 
 # Test artifacts
 *.test
