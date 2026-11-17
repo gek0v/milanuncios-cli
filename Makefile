@@ -1,4 +1,4 @@
-.PHONY: build test check fmt vet clean docs
+.PHONY: build test test-e2e check fmt vet clean docs
 
 BINARY_NAME=milanuncios
 
@@ -10,6 +10,9 @@ docs:
 
 test:
 	go test ./... -count=1
+
+test-e2e: build
+	python scripts/e2e_test_suite.py
 
 fmt:
 	gofmt -w .

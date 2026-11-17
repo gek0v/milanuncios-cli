@@ -230,6 +230,9 @@ func (a *App) watchListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if list == nil {
+				list = store.WatchList{}
+			}
 
 			return a.Printer.Print(list)
 		},
@@ -397,6 +400,9 @@ func (a *App) watchEventsCmd() *cobra.Command {
 			events, err := st.ListEvents(watchID, limit)
 			if err != nil {
 				return err
+			}
+			if events == nil {
+				events = store.EventList{}
 			}
 
 			return a.Printer.Print(events)

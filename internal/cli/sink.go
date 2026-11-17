@@ -30,7 +30,7 @@ func (a *App) sinkListCmd() *cobra.Command {
 		Short: "List configured notification sinks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var list sink.SinkInfoList
+			list := sink.SinkInfoList{}
 			if a.Cfg != nil && a.Cfg.Sinks != nil {
 				for name, sc := range a.Cfg.Sinks {
 					list = append(list, sink.SinkInfo{
