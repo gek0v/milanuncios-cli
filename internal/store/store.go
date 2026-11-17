@@ -149,6 +149,15 @@ func Open(dbPath string) (*Store, error) {
 	// Single writer to prevent locking errors in modernc sqlite
 	db.SetMaxOpenConns(1)
 
+	pragmas := "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;"
+	if dbPath != ":memory:" {
+		pragmas += " PRAGMA journal_mode = WAL;"
+	}
+	if _, err := db.Exec(pragmas); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("setting sqlite pragmas: %w", err)
+	}
+
 	s := &Store{
 		dbPath: dbPath,
 		db:     db,
@@ -253,36 +262,7 @@ func (s *Store) AddWatch(w *Watch) error {
 func (s *Store) GetWatch(idOrName string) (*Watch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	var query string
-
-	trimmed := strings.TrimSpace(idOrName)
-	query = `SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status FROM watches WHERE id = ? OR name = ? LIMIT 1`
-
-	row := s.db.QueryRow(query, trimmed, trimmed)
-
-	var w Watch
-	var lastCheckedStr sql.NullString
-	var createdStr string
-
-	err := row.Scan(&w.ID, &w.Type, &w.Name, &w.Target, &w.QueryJSON, &w.IntervalSec, &lastCheckedStr, &createdStr, &w.Status)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-
-	if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
-		w.CreatedAt = t
-	}
-	if lastCheckedStr.Valid && lastCheckedStr.String != "" {
-		if t, err := time.Parse(time.RFC3339, lastCheckedStr.String); err == nil {
-			w.LastCheckedAt = &t
-		}
-	}
-
-	return &w, nil
+	return s.getWatchLocked(idOrName)
 }
 
 // ListWatches returns all configured watches.
@@ -359,9 +339,19 @@ func (s *Store) DeleteWatch(idOrName string) error {
 		return err
 	}
 
-	_, _ = s.db.Exec(`DELETE FROM seen_items WHERE watch_id = ?`, w.ID)
-	_, _ = s.db.Exec(`DELETE FROM events WHERE watch_id = ?`, w.ID)
-	res, err := s.db.Exec(`DELETE FROM watches WHERE id = ?`, w.ID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM seen_items WHERE watch_id = ?`, w.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM events WHERE watch_id = ?`, w.ID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM watches WHERE id = ?`, w.ID)
 	if err != nil {
 		return err
 	}
@@ -372,7 +362,7 @@ func (s *Store) DeleteWatch(idOrName string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) getWatchLocked(idOrName string) (*Watch, error) {
@@ -391,6 +381,16 @@ func (s *Store) getWatchLocked(idOrName string) (*Watch, error) {
 		}
 		return nil, err
 	}
+
+	if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+		w.CreatedAt = t
+	}
+	if lastCheckedStr.Valid && lastCheckedStr.String != "" {
+		if t, err := time.Parse(time.RFC3339, lastCheckedStr.String); err == nil {
+			w.LastCheckedAt = &t
+		}
+	}
+
 	return &w, nil
 }
 

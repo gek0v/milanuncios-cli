@@ -112,7 +112,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 		return nil, fmt.Errorf("reading seen items: %w", err)
 	}
 
-	isFirstRun := len(seenMap) == 0
+	isFirstRun := (w.LastCheckedAt == nil && len(seenMap) == 0)
 	var generatedEvents []store.Event
 	now := time.Now().UTC()
 
@@ -133,6 +133,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 			if err := e.Store.UpsertSeenItem(seenItem); err != nil {
 				return nil, err
 			}
+			seenMap[item.ID] = *seenItem
 
 			// Do not flood new events on the very first baseline check of a brand new watch
 			if !isFirstRun {
@@ -156,7 +157,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 			}
 		} else {
 			// Existing ad - check price changes
-			if seen.LastPrice != item.Price && item.Price > 0 {
+			if seen.LastPrice != item.Price && item.Price >= 0 && seen.LastPrice >= 0 {
 				diff := item.Price - seen.LastPrice
 				ev := store.Event{
 					WatchID:   w.ID,
@@ -198,6 +199,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			_ = e.Store.UpdateWatchStatus(w.ID, "paused")
 			ev := store.Event{
 				WatchID:   w.ID,
 				EventType: "ad.removed",
@@ -207,6 +209,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 					"watch_id": w.ID,
 					"name":     w.Name,
 					"ad_id":    w.Target,
+					"notice":   "ad listing removed; watch paused",
 				}),
 				CreatedAt: now,
 			}
@@ -241,7 +244,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 			return nil, err
 		}
 	} else {
-		if seen.LastPrice != ad.Price && ad.Price > 0 {
+		if seen.LastPrice != ad.Price && ad.Price >= 0 && seen.LastPrice >= 0 {
 			diff := ad.Price - seen.LastPrice
 			ev := store.Event{
 				WatchID:   w.ID,

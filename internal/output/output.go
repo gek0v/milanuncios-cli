@@ -328,6 +328,7 @@ func Classify(err error, version, command string) Envelope {
 			strings.HasPrefix(msg, "unknown shorthand flag") ||
 			strings.HasPrefix(msg, "flag needs an argument") ||
 			strings.HasPrefix(msg, "invalid argument") ||
+			strings.Contains(msg, "required flag") ||
 			strings.Contains(msg, "accepts ") ||
 			strings.Contains(msg, "requires at least") ||
 			strings.Contains(msg, "exact ") {

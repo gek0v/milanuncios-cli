@@ -475,13 +475,30 @@ class TestIOIntegrity(MilanunciosCLITestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn("pass --cookies <file> in non-interactive mode", res.stderr)
 
+    def test_58_watch_add_integer_interval_below_minimum_fails(self):
+        res = self.run_cli("watch", "add", "search", "bmw", "--interval", "1")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("interval must be at least 10 seconds", res.stderr)
+
+    def test_59_profile_remove_nonexistent_exit_code_4(self):
+        res = self.run_cli("profile", "remove", "ghost-nonexistent-profile")
+        self.assertEqual(res.returncode, 4)
+        self.assertIn("not found", res.stderr.lower())
+
+    def test_60_skills_get_format_json_valid(self):
+        res = self.run_cli("skills", "get", "milanuncios-usage", "--format", "json")
+        self.assertEqual(res.returncode, 0)
+        data = json.loads(res.stdout)
+        self.assertEqual(data.get("name"), "milanuncios-usage")
+        self.assertIn("Milanuncios CLI Agent Guide", data.get("content", ""))
+
 
 # ==============================================================================
 # CLI Test Runner
 # ==============================================================================
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (57 Tests)")
+    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (60 Tests)")
     print("=" * 70)
 
     suite = unittest.TestSuite()

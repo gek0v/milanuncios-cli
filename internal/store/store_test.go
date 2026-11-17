@@ -172,4 +172,12 @@ func TestStoreLifecycle(t *testing.T) {
 	if err != store.ErrNotFound {
 		t.Fatalf("expected ErrNotFound after deletion, got %v", err)
 	}
+	seenAfterDelete, err := s.GetSeenItems(w1.ID)
+	if err != nil || len(seenAfterDelete) != 0 {
+		t.Fatalf("expected 0 seen items after delete, got %d (err: %v)", len(seenAfterDelete), err)
+	}
+	eventsAfterDelete, err := s.ListEvents(w1.ID, 10)
+	if err != nil || len(eventsAfterDelete) != 0 {
+		t.Fatalf("expected 0 events after delete, got %d (err: %v)", len(eventsAfterDelete), err)
+	}
 }

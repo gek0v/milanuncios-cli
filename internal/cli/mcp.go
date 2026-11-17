@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/gek0v/milanuncios-cli/internal/mcp"
@@ -69,6 +70,16 @@ func (a *App) skillsCmd() *cobra.Command {
 	return cmd
 }
 
+// SkillResult wraps an AI agent prompt guideline for multi-format output.
+type SkillResult struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+func (s SkillResult) Pretty(w io.Writer, color bool) {
+	fmt.Fprint(w, s.Content)
+}
+
 func (a *App) skillsGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <skill-name>",
@@ -80,9 +91,10 @@ func (a *App) skillsGetCmd() *cobra.Command {
 				return output.NotFoundf("skill %q not found (available: milanuncios-usage)", args[0])
 			}
 
-			skillText := mcp.GetSkill()
-			fmt.Fprint(a.Stdout, skillText)
-			return nil
+			return a.Printer.Print(SkillResult{
+				Name:    name,
+				Content: mcp.GetSkill(),
+			})
 		},
 	}
 }

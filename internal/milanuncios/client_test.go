@@ -204,6 +204,9 @@ func TestExtractAdID(t *testing.T) {
 		{"r492817294", "492817294", false},
 		{"R492817294", "492817294", false},
 		{"https://www.milanuncios.com/bicicletas/bicicleta-montana-492817294.htm", "492817294", false},
+		{"https://www.milanuncios.com/moviles-en-madrid/iphone-14-pro-max-512gb-492817294.htm", "492817294", false},
+		{"https://www.milanuncios.com/motor/bmw-320d-pack-m-492817294.htm?fromSearch=1", "492817294", false},
+		{"https://www.milanuncios.com/motor/bmw-320d-pack-m-492817294", "492817294", false},
 		{"https://www.milanuncios.com/anuncios/492817294.htm", "492817294", false},
 		{"https://www.milanuncios.com/anuncios/492817294", "492817294", false},
 		{"invalid-no-id", "", true},
@@ -440,6 +443,29 @@ func TestParseCookies(t *testing.T) {
 		t.Fatalf("expected 'jwt-session-token-abc', got %q (err: %v)", tok, err)
 	}
 
+	// Single JSON object
+	singleJSON := `{"name": "token", "value": "single-json-token"}`
+	tok, err = milanuncios.ParseCookies(singleJSON)
+	if err != nil || tok != "single-json-token" {
+		t.Fatalf("expected 'single-json-token', got %q (err: %v)", tok, err)
+	}
+
+	// Netscape format with #HttpOnly_
+	httpOnlyCookies := `# Netscape HTTP Cookie File
+#HttpOnly_.milanuncios.com	TRUE	/	TRUE	1799999999	token	httponly-token-val
+`
+	tok, err = milanuncios.ParseCookies(httpOnlyCookies)
+	if err != nil || tok != "httponly-token-val" {
+		t.Fatalf("expected 'httponly-token-val', got %q (err: %v)", tok, err)
+	}
+
+	// Quoted cookie value
+	quotedCookies := `token="quoted-jwt-token"; other=123`
+	tok, err = milanuncios.ParseCookies(quotedCookies)
+	if err != nil || tok != "quoted-jwt-token" {
+		t.Fatalf("expected 'quoted-jwt-token', got %q (err: %v)", tok, err)
+	}
+
 	// Netscape format
 	netscapeCookies := `# Netscape HTTP Cookie File
 .milanuncios.com	TRUE	/	TRUE	1799999999	session	session-token-xyz
@@ -543,5 +569,56 @@ func TestClientAuthMeAndFavorites(t *testing.T) {
 	}
 	if err := client.Unfavorite(context.Background(), "888"); err != nil {
 		t.Fatalf("unexpected error in Unfavorite: %v", err)
+	}
+}
+
+func TestSendMessagePayloadInBody(t *testing.T) {
+	var receivedBody map[string]string
+	var receivedContentType string
+	var rawQuery string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations/conv-123/messages" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		rawQuery = r.URL.RawQuery
+		receivedContentType = r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+
+		msg := milanuncios.Message{
+			ID:             "msg-1",
+			ConversationID: "conv-123",
+			SenderID:       "user-me",
+			Text:           receivedBody["text"],
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msg)
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-token")
+
+	msg, err := client.SendMessage(context.Background(), "conv-123", "¿Sigue disponible?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msg.Text != "¿Sigue disponible?" {
+		t.Fatalf("expected message text '¿Sigue disponible?', got %q", msg.Text)
+	}
+	if !strings.HasPrefix(receivedContentType, "application/json") {
+		t.Fatalf("expected application/json Content-Type, got %q", receivedContentType)
+	}
+	if rawQuery != "" {
+		t.Fatalf("expected query string to be empty, got %q", rawQuery)
+	}
+	if receivedBody["text"] != "¿Sigue disponible?" {
+		t.Fatalf("expected body text '¿Sigue disponible?', got %q", receivedBody["text"])
 	}
 }

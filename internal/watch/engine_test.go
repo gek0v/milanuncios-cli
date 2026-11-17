@@ -90,6 +90,29 @@ func TestEngineSearchDiffing(t *testing.T) {
 	if res3.Events[0].EventType != "ad.price_changed" || res3.Events[0].AdID != "ad-1" {
 		t.Fatalf("unexpected price alert event: %+v", res3.Events[0])
 	}
+
+	// 4. Fourth check: duplicate promoted ads in single search response should emit only 1 event
+	returnItems = append(returnItems,
+		milanuncios.AdItem{ID: "ad-promoted", Title: "MacBook Promoted", Price: 700},
+		milanuncios.AdItem{ID: "ad-promoted", Title: "MacBook Promoted", Price: 700},
+	)
+	res4, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("fourth check failed: %v", err)
+	}
+	if res4.NewItems != 1 {
+		t.Fatalf("expected exactly 1 new item event for duplicate ad, got %d", res4.NewItems)
+	}
+
+	// 5. Fifth check: price drop to 0 € (free/gratis) should trigger price alert
+	returnItems[0].Price = 0
+	res5, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("fifth check failed: %v", err)
+	}
+	if res5.PriceAlerts != 1 {
+		t.Fatalf("expected 1 price alert for price drop to 0, got %d", res5.PriceAlerts)
+	}
 }
 
 func TestEngineAdDiffing(t *testing.T) {
@@ -163,5 +186,23 @@ func TestEngineAdDiffing(t *testing.T) {
 	}
 	if res3.Events[0].EventType != "ad.removed" {
 		t.Fatalf("expected ad.removed event, got %s", res3.Events[0].EventType)
+	}
+
+	// 4. Verify watch was paused to prevent infinite removed event storm
+	wReloaded, err := st.GetWatch(w.Name)
+	if err != nil {
+		t.Fatalf("failed to reload watch: %v", err)
+	}
+	if wReloaded.Status != "paused" {
+		t.Fatalf("expected watch status to be 'paused' after ad removal, got %q", wReloaded.Status)
+	}
+
+	// 5. Subsequent CheckAll should skip this paused watch
+	results, err := eng.CheckAll(context.Background())
+	if err != nil {
+		t.Fatalf("CheckAll failed: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results from CheckAll for paused watch, got %d", len(results))
 	}
 }

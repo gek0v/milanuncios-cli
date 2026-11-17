@@ -446,6 +446,36 @@ func TestExecuteExitCodes(t *testing.T) {
 	if !strings.Contains(stderr.String(), "unknown format") {
 		t.Fatalf("expected error message on stderr, got: %s", stderr.String())
 	}
+
+	// Missing required flag
+	stderr.Reset()
+	os.Args = []string{"milanuncios", "search", "filters"}
+	code = app.Execute()
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for missing required flag, got %d (stderr: %s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "required flag") {
+		t.Fatalf("expected 'required flag' on stderr, got: %s", stderr.String())
+	}
+
+	// Pure integer interval below minimum (< 10)
+	stderr.Reset()
+	os.Args = []string{"milanuncios", "watch", "add", "search", "bici", "--interval", "1"}
+	code = app.Execute()
+	if code != 2 {
+		t.Fatalf("expected exit code 2 for interval < 10, got %d (stderr: %s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "at least 10 seconds") {
+		t.Fatalf("expected 'at least 10 seconds' message, got: %s", stderr.String())
+	}
+
+	// Profile remove for non-existent profile returns 4 (NotFound)
+	stderr.Reset()
+	os.Args = []string{"milanuncios", "profile", "remove", "ghost_profile_123"}
+	code = app.Execute()
+	if code != 4 {
+		t.Fatalf("expected exit code 4 for non-existent profile, got %d (stderr: %s)", code, stderr.String())
+	}
 }
 
 func TestAuthAndProfileCommands(t *testing.T) {
@@ -875,6 +905,30 @@ func TestMCPAndSkillsCommands(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "Milanuncios CLI Agent Guide") {
 			t.Fatalf("expected skill guide in output, got: %s", stdout.String())
+		}
+	}
+
+	// 1b. skills get with --format json
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"skills", "get", "milanuncios-usage", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("skills get --format json failed: %v", err)
+		}
+		var res cli.SkillResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode skill json: %v (stdout: %s)", err, stdout.String())
+		}
+		if res.Name != "milanuncios-usage" || !strings.Contains(res.Content, "Milanuncios CLI Agent Guide") {
+			t.Fatalf("unexpected skill json result: %+v", res)
 		}
 	}
 

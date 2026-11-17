@@ -108,6 +108,16 @@ func (a *App) profileRemoveCmd() *cobra.Command {
 				return output.Usagef("cannot remove default profile %q. Switch to another profile first", target)
 			}
 
+			creds, _ := config.LoadCredentials(a.Paths.CredentialsFile)
+			_, inCfg := a.Cfg.Profiles[target]
+			var inCreds bool
+			if creds != nil {
+				_, inCreds = creds.Profiles[target]
+			}
+			if !inCfg && !inCreds {
+				return output.NotFoundf("profile %q not found", target)
+			}
+
 			_ = config.RemoveProfileCredentials(a.Paths.CredentialsFile, target)
 			delete(a.Cfg.Profiles, target)
 			_ = config.Save(a.Paths.ConfigFile, a.Cfg)

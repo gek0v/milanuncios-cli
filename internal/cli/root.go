@@ -174,10 +174,15 @@ func (a *App) Execute() int {
 	cmd.SetOut(a.Stdout)
 	cmd.SetErr(a.Stderr)
 
-	err := cmd.Execute()
+	executedCmd, err := cmd.ExecuteC()
 	if err == nil {
 		return 0
 	}
 
-	return output.PrintError(a.Stderr, err, output.ErrorFormat(a.FlagErrorFormat), a.Version, cmd.CommandPath())
+	cmdPath := "milanuncios"
+	if executedCmd != nil {
+		cmdPath = executedCmd.CommandPath()
+	}
+
+	return output.PrintError(a.Stderr, err, output.ErrorFormat(a.FlagErrorFormat), a.Version, cmdPath)
 }

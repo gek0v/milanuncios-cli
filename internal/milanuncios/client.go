@@ -104,6 +104,12 @@ func (c *Client) setBrowserUA() {
 	c.uaMu.Unlock()
 }
 
+func (c *Client) isBrowserUA() bool {
+	c.uaMu.Lock()
+	defer c.uaMu.Unlock()
+	return c.useBrowserUA
+}
+
 func isWAFBlock(body []byte) bool {
 	lower := strings.ToLower(string(body))
 	return strings.Contains(lower, "cloudflare") ||
@@ -114,8 +120,7 @@ func isWAFBlock(body []byte) bool {
 }
 
 func isBotStatus(status int, body []byte) bool {
-	return status == http.StatusTooManyRequests ||
-		(status == http.StatusForbidden && !json.Valid(body))
+	return status == http.StatusTooManyRequests || status == http.StatusForbidden
 }
 
 func (c *Client) debugf(format string, args ...any) {
@@ -124,7 +129,7 @@ func (c *Client) debugf(format string, args ...any) {
 	}
 }
 
-func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values, auth bool, out any) error {
+func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values, body any, auth bool, out any) error {
 	endpoint := method + " " + path
 
 	if auth && c.SessionToken == "" {
@@ -140,13 +145,29 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		u += "?" + query.Encode()
 	}
 
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encoding request body: %w", err)
+		}
+	}
+
 	buildReq := func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, method, u, nil)
+		var bodyReader io.Reader
+		if len(bodyBytes) > 0 {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("User-Agent", c.currentUA())
 		req.Header.Set("Accept", "application/json")
+		if len(bodyBytes) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		if auth && c.SessionToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.SessionToken)
 			req.Header.Set("Cookie", "token="+c.SessionToken)
@@ -174,7 +195,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 	c.debugf("< %d %s (%d bytes)", resp.StatusCode, endpoint, len(raw))
 
 	// If WAF blocks honest UA with 403 HTML, retry once with realistic browser UA
-	if resp.StatusCode == http.StatusForbidden && isWAFBlock(raw) && !c.useBrowserUA {
+	if resp.StatusCode == http.StatusForbidden && isWAFBlock(raw) && !c.isBrowserUA() {
 		c.setBrowserUA()
 		if c.Notice != nil {
 			c.Notice("milanuncios rejected cli user agent; retrying with browser user agent")
@@ -184,6 +205,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		if err != nil {
 			return err
 		}
+		resp.Body.Close()
 		resp, err = c.HTTP.Do(req)
 		if err != nil {
 			return c.wrapNetError(endpoint, err)
@@ -268,9 +290,7 @@ func (c *Client) snippet(endpoint string, raw []byte) string {
 		return "[redacted authenticated payload]"
 	}
 	s := strings.TrimSpace(string(raw))
-	if len(s) > 300 {
-		s = s[:300] + "…"
-	}
+	s = output.Truncate(s, 300)
 	return c.redact(s)
 }
 
@@ -332,7 +352,7 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 	}
 
 	var res SearchResult
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/search", params, false, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/search", params, nil, false, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -341,7 +361,7 @@ func (c *Client) Search(ctx context.Context, q SearchQuery) (*SearchResult, erro
 // ListCategories retrieves the category taxonomy tree.
 func (c *Client) ListCategories(ctx context.Context) (CategoryListResult, error) {
 	var cats CategoryListResult
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/categories", nil, false, &cats); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/categories", nil, nil, false, &cats); err != nil {
 		return nil, err
 	}
 	return cats, nil
@@ -355,7 +375,7 @@ func (c *Client) GetCategoryFilters(ctx context.Context, categoryID int) (*Categ
 
 	path := fmt.Sprintf("/api/v1/categories/%d/filters", categoryID)
 	var res CategoryFiltersResult
-	if err := c.doRequest(ctx, http.MethodGet, path, nil, false, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, path, nil, nil, false, &res); err != nil {
 		return nil, err
 	}
 	if res.CategoryID == 0 {
@@ -365,7 +385,8 @@ func (c *Client) GetCategoryFilters(ctx context.Context, categoryID int) (*Categ
 }
 
 var (
-	adURLRegex     = regexp.MustCompile(`[-/rR]([0-9]{1,15})(?:\.htm)?(?:[/?#]|$)`)
+	adURLHtmRegex  = regexp.MustCompile(`[-/rR]([0-9]{1,15})\.htm(?:[?#]|$)`)
+	adURLRegex     = regexp.MustCompile(`[-/rR]([0-9]{1,15})/?(?:[?#]|$)`)
 	adNumericRegex = regexp.MustCompile(`^[rR]?([0-9]{1,15})$`)
 )
 
@@ -380,8 +401,16 @@ func ExtractAdID(idOrURL string) (string, error) {
 		return m[1], nil
 	}
 
-	if m := adURLRegex.FindStringSubmatch(trimmed); len(m) > 1 {
+	if m := adURLHtmRegex.FindStringSubmatch(trimmed); len(m) > 1 {
 		return m[1], nil
+	}
+
+	matches := adURLRegex.FindAllStringSubmatch(trimmed, -1)
+	if len(matches) > 0 {
+		last := matches[len(matches)-1]
+		if len(last) > 1 {
+			return last[1], nil
+		}
 	}
 
 	return "", output.Usagef("could not extract ad ID from %q (expected numeric ID or Milanuncios URL)", idOrURL)
@@ -395,7 +424,7 @@ func (c *Client) GetAd(ctx context.Context, idOrURL string) (*AdItem, error) {
 	}
 
 	var item AdItem
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/ads/"+id, nil, false, &item); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/ads/"+id, nil, nil, false, &item); err != nil {
 		return nil, err
 	}
 
@@ -412,7 +441,7 @@ func (c *Client) GetAd(ctx context.Context, idOrURL string) (*AdItem, error) {
 // Me retrieves the authenticated user's account profile.
 func (c *Client) Me(ctx context.Context) (*UserProfile, error) {
 	var profile UserProfile
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me", nil, true, &profile); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me", nil, nil, true, &profile); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -425,7 +454,7 @@ func (c *Client) MyAds(ctx context.Context, sold bool) ([]AdItem, error) {
 		params.Set("status", "sold")
 	}
 	var res []AdItem
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/ads", params, true, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/ads", params, nil, true, &res); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -434,7 +463,7 @@ func (c *Client) MyAds(ctx context.Context, sold bool) ([]AdItem, error) {
 // MyFavorites returns listings marked as favorites by the user.
 func (c *Client) MyFavorites(ctx context.Context) ([]AdItem, error) {
 	var res []AdItem
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/favorites", nil, true, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/me/favorites", nil, nil, true, &res); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -446,7 +475,7 @@ func (c *Client) Favorite(ctx context.Context, adID string) error {
 	if err != nil {
 		return err
 	}
-	return c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, true, nil)
+	return c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, nil, true, nil)
 }
 
 // Unfavorite removes an ad from favorites.
@@ -455,13 +484,13 @@ func (c *Client) Unfavorite(ctx context.Context, adID string) error {
 	if err != nil {
 		return err
 	}
-	return c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, true, nil)
+	return c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/ads/%s/favorite", id), nil, nil, true, nil)
 }
 
 // ListConversations retrieves the user's active chat conversations.
 func (c *Client) ListConversations(ctx context.Context) (ConversationList, error) {
 	var list ConversationList
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations", nil, true, &list); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations", nil, nil, true, &list); err != nil {
 		return nil, err
 	}
 	return list, nil
@@ -474,7 +503,7 @@ func (c *Client) GetConversation(ctx context.Context, id string) (*ConversationD
 		return nil, output.Usagef("conversation ID cannot be empty")
 	}
 	var details ConversationDetails
-	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations/"+trimmed, nil, true, &details); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/conversations/"+trimmed, nil, nil, true, &details); err != nil {
 		return nil, err
 	}
 	return &details, nil
@@ -491,9 +520,9 @@ func (c *Client) SendMessage(ctx context.Context, convID, text string) (*Message
 		return nil, output.Usagef("message text cannot be empty")
 	}
 
-	params := url.Values{"text": {trimmedText}}
+	payload := map[string]string{"text": trimmedText}
 	var msg Message
-	if err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/conversations/%s/messages", trimmedID), params, true, &msg); err != nil {
+	if err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/api/v1/conversations/%s/messages", trimmedID), nil, payload, true, &msg); err != nil {
 		return nil, err
 	}
 	return &msg, nil
@@ -508,7 +537,17 @@ func ParseCookies(raw string) (string, error) {
 	}
 
 	// 1. Try parsing JSON format (Cookie-Editor / EditThisCookie)
-	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+	if strings.HasPrefix(trimmed, "{") {
+		var single struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &single); err == nil && single.Value != "" {
+			return strings.Trim(strings.TrimSpace(single.Value), "\""), nil
+		}
+	}
+
+	if strings.HasPrefix(trimmed, "[") {
 		var cookies []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
@@ -518,7 +557,7 @@ func ParseCookies(raw string) (string, error) {
 				lower := strings.ToLower(ck.Name)
 				if lower == "token" || lower == "session" || lower == "adevinta_session" || lower == "jwt" || lower == "session_token" {
 					if ck.Value != "" {
-						return ck.Value, nil
+						return strings.Trim(strings.TrimSpace(ck.Value), "\""), nil
 					}
 				}
 			}
@@ -529,14 +568,16 @@ func ParseCookies(raw string) (string, error) {
 	lines := strings.Split(trimmed, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if strings.HasPrefix(line, "#HttpOnly_") {
+			line = strings.TrimPrefix(line, "#HttpOnly_")
+		} else if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) >= 7 {
 			name := strings.ToLower(parts[5])
 			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
-				return parts[6], nil
+				return strings.Trim(strings.TrimSpace(parts[6]), "\""), nil
 			}
 		}
 	}
@@ -548,14 +589,14 @@ func ParseCookies(raw string) (string, error) {
 		if len(kv) == 2 {
 			name := strings.ToLower(strings.TrimSpace(kv[0]))
 			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
-				return strings.TrimSpace(kv[1]), nil
+				return strings.Trim(strings.TrimSpace(kv[1]), "\""), nil
 			}
 		}
 	}
 
 	// 4. Fallback: if raw is a pure token string without spaces/semicolons
 	if !strings.ContainsAny(trimmed, " \t\r\n;") && len(trimmed) > 10 {
-		return trimmed, nil
+		return strings.Trim(trimmed, "\""), nil
 	}
 
 	return "", output.Usagef("could not find session cookie (token/session/adevinta_session) in provided data")

@@ -25,6 +25,9 @@ func parseIntervalSec(val string) (int, error) {
 
 	// Try pure seconds integer
 	if sec, err := strconv.Atoi(trimmed); err == nil && sec > 0 {
+		if sec < 10 {
+			return 0, output.Usagef("interval must be at least 10 seconds")
+		}
 		return sec, nil
 	}
 
@@ -456,7 +459,10 @@ func (a *App) watchRunCmd() *cobra.Command {
 				select {
 				case <-ctx.Done():
 					fmt.Fprintln(a.Stderr, "\nStopping watch engine.")
-					return nil
+					return &output.DomainError{
+						Kind: output.KindInterrupted,
+						Msg:  "watch daemon interrupted by signal",
+					}
 				case <-ticker.C:
 					results, err := eng.CheckAll(ctx)
 					if err != nil {
