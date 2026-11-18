@@ -20,6 +20,30 @@ type SinkSender interface {
 	Dispatch(ctx context.Context, ev store.Event) []error
 }
 
+// PerSinkSender delivers events to named sinks individually.
+type PerSinkSender interface {
+	SinkSender
+	SinkNames() []string
+	SendTo(ctx context.Context, name string, ev store.Event) error
+}
+
+// BackoffDuration calculates exponential backoff based on retry attempts.
+// 1 attempt: 30s, 2: 1m, 3: 2m, 4: 4m, 5+: 8m (capped at 10m).
+func BackoffDuration(attempts int) time.Duration {
+	if attempts <= 0 {
+		return 0
+	}
+	shift := attempts - 1
+	if shift > 5 {
+		shift = 5
+	}
+	dur := 30 * time.Second * (1 << shift)
+	if dur > 10*time.Minute {
+		dur = 10 * time.Minute
+	}
+	return dur
+}
+
 // Engine orchestrates periodic checks, diffing, and event generation for watches.
 type Engine struct {
 	Store           *store.Store
@@ -28,6 +52,7 @@ type Engine struct {
 	Notice          func(string)
 	SeenItemsTTL    time.Duration
 	DispatchTimeout time.Duration
+	RetryBackoff    func(attempts int) time.Duration
 }
 
 // NewEngine creates an initialized watch Engine.
@@ -64,6 +89,9 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 		e.Notice(fmt.Sprintf("pruning seen items: %v", err))
 	}
 
+	// Retry any previously undelivered events whose backoff has elapsed
+	_ = e.retryUndeliveredForWatch(ctx, w.ID)
+
 	var events []store.Event
 	var err error
 
@@ -81,7 +109,7 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 	if err != nil {
 		var de *output.DomainError
 		if errors.As(err, &de) && (de.Status == http.StatusUnauthorized || de.Kind == output.KindAuth) {
-			_ = e.Store.UpdateWatchStatus(w.ID, "paused")
+			_ = e.Store.UpdateWatchStatus(ctx, w.ID, "paused")
 			ev := store.Event{
 				WatchID:   w.ID,
 				EventType: "watch.paused",
@@ -94,7 +122,7 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 				}),
 				CreatedAt: time.Now().UTC(),
 			}
-			_ = e.Store.RecordEvent(&ev)
+			_ = e.Store.RecordEvent(ctx, &ev)
 			if e.Notice != nil {
 				e.Notice(fmt.Sprintf("watch %d (%s) paused: session expired (HTTP 401)", w.ID, w.Name))
 			}
@@ -103,7 +131,7 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 	}
 	res.Events = events
 
-	// Dispatch to external sinks concurrently with bounded workers and batch timeout
+	// Dispatch newly generated events to configured sinks concurrently with bounded workers and batch timeout
 	if e.Sinks != nil && len(res.Events) > 0 {
 		timeout := e.DispatchTimeout
 		if timeout <= 0 {
@@ -111,9 +139,6 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 		}
 		batchCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-
-		var deliveredMu sync.Mutex
-		var deliveredIDs []int64
 
 		maxWorkers := 5
 		if len(res.Events) < maxWorkers {
@@ -136,25 +161,170 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 					<-sem
 					wg.Done()
 				}()
-				errs := e.Sinks.Dispatch(batchCtx, ev)
-				if len(errs) == 0 {
-					deliveredMu.Lock()
-					deliveredIDs = append(deliveredIDs, ev.ID)
-					deliveredMu.Unlock()
-				}
+				_ = e.dispatchEvent(batchCtx, ev)
 			}(ev)
 		}
 		wg.Wait()
-
-		if len(deliveredIDs) > 0 {
-			_ = e.Store.MarkEventsDelivered(deliveredIDs)
-		}
 	}
 
 	res.Duration = time.Since(start)
-	_ = e.Store.UpdateWatchChecked(w.ID, time.Now().UTC())
+	_ = e.Store.UpdateWatchChecked(ctx, w.ID, time.Now().UTC())
 
 	return res, nil
+}
+
+func (e *Engine) dispatchEvent(ctx context.Context, ev store.Event) error {
+	if e.Sinks == nil {
+		return nil
+	}
+
+	if perSink, ok := e.Sinks.(PerSinkSender); ok {
+		sinkNames := perSink.SinkNames()
+		if len(sinkNames) == 0 {
+			return nil
+		}
+
+		deliveries, _ := e.Store.GetEventDeliveries(ctx, ev.ID)
+		deliveredMap := make(map[string]bool, len(deliveries))
+		for _, d := range deliveries {
+			if d.Status == "delivered" {
+				deliveredMap[d.SinkName] = true
+			}
+		}
+
+		allDelivered := true
+		for _, name := range sinkNames {
+			if deliveredMap[name] {
+				continue
+			}
+			err := perSink.SendTo(ctx, name, ev)
+			_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, name, err)
+			if err != nil {
+				allDelivered = false
+				if e.Notice != nil {
+					e.Notice(fmt.Sprintf("sink %s failed for event %d: %v", name, ev.ID, err))
+				}
+			}
+		}
+
+		if allDelivered {
+			_ = e.Store.MarkEventsDelivered(ctx, []int64{ev.ID})
+		}
+		return nil
+	}
+
+	// Fallback for simple SinkSender
+	errs := e.Sinks.Dispatch(ctx, ev)
+	if len(errs) == 0 {
+		_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, "default", nil)
+		_ = e.Store.MarkEventsDelivered(ctx, []int64{ev.ID})
+	} else {
+		_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, "default", errs[0])
+		if e.Notice != nil {
+			e.Notice(fmt.Sprintf("sink dispatch failed for event %d: %v", ev.ID, errs[0]))
+		}
+	}
+	return nil
+}
+
+func (e *Engine) retryUndeliveredForWatch(ctx context.Context, watchID int64) error {
+	if e.Sinks == nil {
+		return nil
+	}
+
+	undelivered, err := e.Store.GetUndeliveredEvents(ctx, watchID, 50)
+	if err != nil || len(undelivered) == 0 {
+		return err
+	}
+
+	now := time.Now().UTC()
+
+	calcBackoff := BackoffDuration
+	if e.RetryBackoff != nil {
+		calcBackoff = e.RetryBackoff
+	}
+
+	if perSink, ok := e.Sinks.(PerSinkSender); ok {
+		sinkNames := perSink.SinkNames()
+		if len(sinkNames) == 0 {
+			return nil
+		}
+
+		for _, ev := range undelivered {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			deliveries, err := e.Store.GetEventDeliveries(ctx, ev.ID)
+			if err != nil {
+				continue
+			}
+
+			delivMap := make(map[string]store.EventDelivery, len(deliveries))
+			for _, d := range deliveries {
+				delivMap[d.SinkName] = d
+			}
+
+			allDelivered := true
+			for _, name := range sinkNames {
+				d, exists := delivMap[name]
+				if exists && d.Status == "delivered" {
+					continue
+				}
+
+				// If failed before, check exponential backoff
+				if exists && d.Attempts > 0 {
+					backoff := calcBackoff(d.Attempts)
+					if now.Sub(d.LastAttemptAt) < backoff {
+						allDelivered = false
+						continue
+					}
+				}
+
+				// Attempt retry
+				sendErr := perSink.SendTo(ctx, name, ev)
+				_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, name, sendErr)
+				if sendErr != nil {
+					allDelivered = false
+					if e.Notice != nil {
+						e.Notice(fmt.Sprintf("sink retry %s failed for event %d: %v", name, ev.ID, sendErr))
+					}
+				}
+			}
+
+			if allDelivered {
+				_ = e.Store.MarkEventsDelivered(ctx, []int64{ev.ID})
+			}
+		}
+		return nil
+	}
+
+	// Fallback for simple SinkSender
+	for _, ev := range undelivered {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		deliveries, _ := e.Store.GetEventDeliveries(ctx, ev.ID)
+		if len(deliveries) > 0 {
+			d := deliveries[0]
+			if d.Attempts > 0 {
+				backoff := calcBackoff(d.Attempts)
+				if now.Sub(d.LastAttemptAt) < backoff {
+					continue
+				}
+			}
+		}
+
+		errs := e.Sinks.Dispatch(ctx, ev)
+		if len(errs) == 0 {
+			_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, "default", nil)
+			_ = e.Store.MarkEventsDelivered(ctx, []int64{ev.ID})
+		} else {
+			_ = e.Store.RecordDeliveryAttempt(ctx, ev.ID, "default", errs[0])
+		}
+	}
+
+	return nil
 }
 
 func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *CheckResult) ([]store.Event, error) {
@@ -171,7 +341,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 		return nil, fmt.Errorf("executing search query: %w", err)
 	}
 
-	seenMap, err := e.Store.GetSeenItems(w.ID)
+	seenMap, err := e.Store.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		return nil, fmt.Errorf("reading seen items: %w", err)
 	}
@@ -311,7 +481,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 		return nil, err
 	}
 
-	seenMap, err := e.Store.GetSeenItems(w.ID)
+	seenMap, err := e.Store.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +573,7 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 		return nil, err
 	}
 
-	seenMap, err := e.Store.GetSeenItems(w.ID)
+	seenMap, err := e.Store.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		return nil, fmt.Errorf("reading seen items: %w", err)
 	}
@@ -519,20 +689,29 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 	return generatedEvents, nil
 }
 
-// CheckAll evaluates all active watches in the store sequentially.
+// CheckAll evaluates all active watches in the store sequentially, respecting each watch's IntervalSec cadence.
 func (e *Engine) CheckAll(ctx context.Context) ([]CheckResult, error) {
-	watches, err := e.Store.ListWatches()
+	watches, err := e.Store.ListWatches(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing watches: %w", err)
 	}
 
 	var results []CheckResult
 	for _, w := range watches {
+		if ctx.Err() != nil {
+			return results, ctx.Err()
+		}
 		if w.Status != "active" {
+			continue
+		}
+		if w.LastCheckedAt != nil && time.Since(*w.LastCheckedAt) < time.Duration(w.IntervalSec)*time.Second {
 			continue
 		}
 		res, err := e.CheckWatch(ctx, &w)
 		if err != nil {
+			if ctx.Err() != nil {
+				return results, ctx.Err()
+			}
 			if output.IsKind(err, output.KindBlocked) {
 				if e.Notice != nil {
 					e.Notice(fmt.Sprintf("watch %d (%s) blocked by anti-bot mitigation; aborting check cycle", w.ID, w.Name))

@@ -184,11 +184,11 @@ func (a *App) favoriteTagCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			if err := st.SaveAnnotation(adID, tag, note, targetPrice); err != nil {
+			if err := st.SaveAnnotation(cmd.Context(), adID, tag, note, targetPrice); err != nil {
 				return fmt.Errorf("saving annotation: %w", err)
 			}
 
-			ann, err := st.GetAnnotation(adID)
+			ann, err := st.GetAnnotation(cmd.Context(), adID)
 			if err != nil {
 				return fmt.Errorf("reading annotation: %w", err)
 			}
@@ -227,7 +227,7 @@ func (a *App) favoriteNotesCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			ann, err := st.GetAnnotation(adID)
+			ann, err := st.GetAnnotation(cmd.Context(), adID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					return output.NotFoundf("annotation for ad %s not found", adID)

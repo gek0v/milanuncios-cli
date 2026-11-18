@@ -141,6 +141,16 @@ func Dim(s string, color bool) string {
 	return "\x1b[2m" + s + "\x1b[0m"
 }
 
+var ansiRegex = regexp.MustCompile(`\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_]|)`)
+
+// StripANSI removes ANSI escape sequences and raw escape control characters from string s.
+func StripANSI(s string) string {
+	if !strings.Contains(s, "\x1b") {
+		return s
+	}
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
 // ColorEnabled inspects NO_COLOR, TERM=dumb and TTY status.
 func ColorEnabled(noColorFlag bool, f *os.File) bool {
 	if noColorFlag || os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {

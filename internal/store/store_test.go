@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -63,6 +64,7 @@ func TestModerncPragmaDSN(t *testing.T) {
 }
 
 func TestStoreForeignKeyCascade(t *testing.T) {
+	ctx := context.Background()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "cascade.db")
 	s, err := store.Open(dbPath)
@@ -77,7 +79,7 @@ func TestStoreForeignKeyCascade(t *testing.T) {
 		Target:      "test target",
 		IntervalSec: 300,
 	}
-	if err := s.AddWatch(w); err != nil {
+	if err := s.AddWatch(ctx, w); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
@@ -91,17 +93,17 @@ func TestStoreForeignKeyCascade(t *testing.T) {
 		LastTitle:   "Item title",
 		RawJSON:     `{"id":"ad-cascade"}`,
 	}
-	if err := s.UpsertSeenItem(seen); err != nil {
+	if err := s.UpsertSeenItem(ctx, seen); err != nil {
 		t.Fatalf("upsert seen item: %v", err)
 	}
 
 	// Delete the watch
-	if err := s.DeleteWatch("cascade-watch"); err != nil {
+	if err := s.DeleteWatch(ctx, "cascade-watch"); err != nil {
 		t.Fatalf("delete watch: %v", err)
 	}
 
 	// Verify seen item is gone
-	items, err := s.GetSeenItems(w.ID)
+	items, err := s.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		t.Fatalf("get seen items: %v", err)
 	}
@@ -124,6 +126,7 @@ func TestStoreConcurrencyReadsWrites(t *testing.T) {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			ctx := context.Background()
 
 			st, err := store.Open(dbPath)
 			if err != nil {
@@ -139,7 +142,7 @@ func TestStoreConcurrencyReadsWrites(t *testing.T) {
 				Target:      "query",
 				IntervalSec: 60,
 			}
-			if err := st.AddWatch(w); err != nil {
+			if err := st.AddWatch(ctx, w); err != nil {
 				errCh <- fmt.Errorf("worker %d add watch: %w", workerID, err)
 				return
 			}
@@ -156,7 +159,7 @@ func TestStoreConcurrencyReadsWrites(t *testing.T) {
 					LastTitle:   fmt.Sprintf("Item %d-%d", workerID, j),
 					RawJSON:     `{"test":true}`,
 				}
-				if err := st.UpsertSeenItem(item); err != nil {
+				if err := st.UpsertSeenItem(ctx, item); err != nil {
 					errCh <- fmt.Errorf("worker %d upsert seen: %w", workerID, err)
 					return
 				}
@@ -168,13 +171,13 @@ func TestStoreConcurrencyReadsWrites(t *testing.T) {
 					PayloadJSON: `{"status":"new"}`,
 					CreatedAt:   now,
 				}
-				if err := st.RecordEvent(ev); err != nil {
+				if err := st.RecordEvent(ctx, ev); err != nil {
 					errCh <- fmt.Errorf("worker %d record event: %w", workerID, err)
 					return
 				}
 
 				// Concurrent read
-				seen, err := st.GetSeenItems(w.ID)
+				seen, err := st.GetSeenItems(ctx, w.ID)
 				if err != nil {
 					errCh <- fmt.Errorf("worker %d get seen: %w", workerID, err)
 					return
@@ -222,7 +225,7 @@ func TestEnsureChatWatchConcurrencyAndUniqueness(t *testing.T) {
 			}
 			defer st.Close()
 
-			w, err := st.EnsureChatWatch()
+			w, err := st.EnsureChatWatch(context.Background())
 			if err != nil {
 				errorsList[idx] = err
 				return
@@ -266,7 +269,7 @@ func TestEnsureChatWatchConcurrencyAndUniqueness(t *testing.T) {
 		Target:      "dup",
 		IntervalSec: 60,
 	}
-	err = s.AddWatch(dupWatch)
+	err = s.AddWatch(context.Background(), dupWatch)
 	if err == nil {
 		t.Fatal("expected error adding watch with duplicate name, got nil")
 	}
@@ -276,6 +279,7 @@ func TestEnsureChatWatchConcurrencyAndUniqueness(t *testing.T) {
 }
 
 func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
+	ctx := context.Background()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "seen_ttl.db")
 	s, err := store.Open(dbPath)
@@ -290,7 +294,7 @@ func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
 		Target:      "test",
 		IntervalSec: 100,
 	}
-	if err := s.AddWatch(w); err != nil {
+	if err := s.AddWatch(ctx, w); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
@@ -307,7 +311,7 @@ func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
 		LastTitle:   "Fresh item",
 		RawJSON:     largeJSON,
 	}
-	if err := s.UpsertSeenItem(itemFresh); err != nil {
+	if err := s.UpsertSeenItem(ctx, itemFresh); err != nil {
 		t.Fatalf("upsert fresh: %v", err)
 	}
 
@@ -321,12 +325,12 @@ func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
 		LastTitle:   "Old item",
 		RawJSON:     largeJSON,
 	}
-	if err := s.UpsertSeenItem(itemOld); err != nil {
+	if err := s.UpsertSeenItem(ctx, itemOld); err != nil {
 		t.Fatalf("upsert old: %v", err)
 	}
 
 	// Verify GetSeenItems omits raw_json to save memory
-	seenMap, err := s.GetSeenItems(w.ID)
+	seenMap, err := s.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		t.Fatalf("get seen items: %v", err)
 	}
@@ -359,7 +363,7 @@ func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
 	}
 
 	// Check seen items after pruning: old item should be gone, fresh item remains
-	seenAfterPrune, err := s.GetSeenItems(w.ID)
+	seenAfterPrune, err := s.GetSeenItems(ctx, w.ID)
 	if err != nil {
 		t.Fatalf("get seen items after prune: %v", err)
 	}
@@ -375,6 +379,7 @@ func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
 }
 
 func TestStoreLifecycle(t *testing.T) {
+	ctx := context.Background()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test_state.db")
 
@@ -392,7 +397,7 @@ func TestStoreLifecycle(t *testing.T) {
 		QueryJSON:   `{"keywords":"bicicleta carretera","province":"valencia"}`,
 		IntervalSec: 180,
 	}
-	if err := s.AddWatch(w1); err != nil {
+	if err := s.AddWatch(ctx, w1); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 	if w1.ID <= 0 {
@@ -405,12 +410,12 @@ func TestStoreLifecycle(t *testing.T) {
 		Target:      "123456",
 		IntervalSec: 600,
 	}
-	if err := s.AddWatch(w2); err != nil {
+	if err := s.AddWatch(ctx, w2); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 
 	// 2. GetWatch by ID and Name
-	byName, err := s.GetWatch("bici-valencia")
+	byName, err := s.GetWatch(ctx, "bici-valencia")
 	if err != nil {
 		t.Fatalf("failed to get watch by name: %v", err)
 	}
@@ -418,7 +423,7 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("unexpected watch by name: %+v", byName)
 	}
 
-	byID, err := s.GetWatch("1")
+	byID, err := s.GetWatch(ctx, "1")
 	if err != nil {
 		t.Fatalf("failed to get watch by id: %v", err)
 	}
@@ -427,7 +432,7 @@ func TestStoreLifecycle(t *testing.T) {
 	}
 
 	// 3. ListWatches
-	list, err := s.ListWatches()
+	list, err := s.ListWatches(ctx)
 	if err != nil {
 		t.Fatalf("failed to list watches: %v", err)
 	}
@@ -442,15 +447,15 @@ func TestStoreLifecycle(t *testing.T) {
 	}
 
 	// 4. Update status and checked
-	if err := s.UpdateWatchStatus(w1.ID, "paused"); err != nil {
+	if err := s.UpdateWatchStatus(ctx, w1.ID, "paused"); err != nil {
 		t.Fatalf("failed to pause watch: %v", err)
 	}
 	now := time.Now().UTC()
-	if err := s.UpdateWatchChecked(w1.ID, now); err != nil {
+	if err := s.UpdateWatchChecked(ctx, w1.ID, now); err != nil {
 		t.Fatalf("failed to update checked: %v", err)
 	}
 
-	reloaded, _ := s.GetWatch("bici-valencia")
+	reloaded, _ := s.GetWatch(ctx, "bici-valencia")
 	if reloaded.Status != "paused" {
 		t.Fatalf("expected status 'paused', got %s", reloaded.Status)
 	}
@@ -468,11 +473,11 @@ func TestStoreLifecycle(t *testing.T) {
 		LastTitle:   "Orbea Orca M30",
 		RawJSON:     `{"id":"ad-999","price":350}`,
 	}
-	if err := s.UpsertSeenItem(item1); err != nil {
+	if err := s.UpsertSeenItem(ctx, item1); err != nil {
 		t.Fatalf("failed to upsert seen item: %v", err)
 	}
 
-	seenMap, err := s.GetSeenItems(w1.ID)
+	seenMap, err := s.GetSeenItems(ctx, w1.ID)
 	if err != nil {
 		t.Fatalf("failed to get seen items: %v", err)
 	}
@@ -483,10 +488,10 @@ func TestStoreLifecycle(t *testing.T) {
 	// Update price
 	item1.LastPrice = 300
 	item1.LastSeenAt = now.Add(5 * time.Minute)
-	if err := s.UpsertSeenItem(item1); err != nil {
+	if err := s.UpsertSeenItem(ctx, item1); err != nil {
 		t.Fatalf("failed to update seen item: %v", err)
 	}
-	seenMap2, _ := s.GetSeenItems(w1.ID)
+	seenMap2, _ := s.GetSeenItems(ctx, w1.ID)
 	if seenMap2["ad-999"].LastPrice != 300 {
 		t.Fatalf("expected updated price 300, got %f", seenMap2["ad-999"].LastPrice)
 	}
@@ -499,14 +504,14 @@ func TestStoreLifecycle(t *testing.T) {
 		PayloadJSON: `{"old_price":350,"new_price":300}`,
 		CreatedAt:   now,
 	}
-	if err := s.RecordEvent(ev1); err != nil {
+	if err := s.RecordEvent(ctx, ev1); err != nil {
 		t.Fatalf("failed to record event: %v", err)
 	}
 	if ev1.ID <= 0 {
 		t.Fatalf("expected positive event ID, got %d", ev1.ID)
 	}
 
-	events, err := s.ListEvents(w1.ID, 10)
+	events, err := s.ListEvents(ctx, w1.ID, 10)
 	if err != nil {
 		t.Fatalf("failed to list events: %v", err)
 	}
@@ -521,33 +526,34 @@ func TestStoreLifecycle(t *testing.T) {
 	}
 
 	// Mark delivered
-	if err := s.MarkEventsDelivered([]int64{ev1.ID}); err != nil {
+	if err := s.MarkEventsDelivered(ctx, []int64{ev1.ID}); err != nil {
 		t.Fatalf("failed to mark event delivered: %v", err)
 	}
-	eventsAfter, _ := s.ListEvents(w1.ID, 10)
+	eventsAfter, _ := s.ListEvents(ctx, w1.ID, 10)
 	if !eventsAfter[0].Delivered {
 		t.Fatal("expected event to be marked delivered")
 	}
 
 	// 7. DeleteWatch
-	if err := s.DeleteWatch("bici-valencia"); err != nil {
+	if err := s.DeleteWatch(ctx, "bici-valencia"); err != nil {
 		t.Fatalf("failed to delete watch: %v", err)
 	}
-	_, err = s.GetWatch("bici-valencia")
+	_, err = s.GetWatch(ctx, "bici-valencia")
 	if err != store.ErrNotFound {
 		t.Fatalf("expected ErrNotFound after deletion, got %v", err)
 	}
-	seenAfterDelete, err := s.GetSeenItems(w1.ID)
+	seenAfterDelete, err := s.GetSeenItems(ctx, w1.ID)
 	if err != nil || len(seenAfterDelete) != 0 {
 		t.Fatalf("expected 0 seen items after delete, got %d (err: %v)", len(seenAfterDelete), err)
 	}
-	eventsAfterDelete, err := s.ListEvents(w1.ID, 10)
+	eventsAfterDelete, err := s.ListEvents(ctx, w1.ID, 10)
 	if err != nil || len(eventsAfterDelete) != 0 {
 		t.Fatalf("expected 0 events after delete, got %d (err: %v)", len(eventsAfterDelete), err)
 	}
 }
 
 func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
+	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "annotations.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
@@ -556,18 +562,18 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	defer s.Close()
 
 	// 1. Get non-existent annotation -> ErrNotFound
-	_, err = s.GetAnnotation("492817294")
+	_, err = s.GetAnnotation(ctx, "492817294")
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 
 	// 2. Save annotation
-	if err := s.SaveAnnotation("492817294", "oferta_enviada", "Ofrecidos 12.500€ el 18/11.", 12500); err != nil {
+	if err := s.SaveAnnotation(ctx, "492817294", "oferta_enviada", "Ofrecidos 12.500€ el 18/11.", 12500); err != nil {
 		t.Fatalf("failed to save annotation: %v", err)
 	}
 
 	// 3. Get annotation
-	ann, err := s.GetAnnotation("492817294")
+	ann, err := s.GetAnnotation(ctx, "492817294")
 	if err != nil {
 		t.Fatalf("failed to get annotation: %v", err)
 	}
@@ -576,10 +582,10 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	}
 
 	// 4. Update annotation
-	if err := s.SaveAnnotation("492817294", "contraoferta", "Pide 13.000€.", 12800); err != nil {
+	if err := s.SaveAnnotation(ctx, "492817294", "contraoferta", "Pide 13.000€.", 12800); err != nil {
 		t.Fatalf("failed to update annotation: %v", err)
 	}
-	ann2, err := s.GetAnnotation("492817294")
+	ann2, err := s.GetAnnotation(ctx, "492817294")
 	if err != nil {
 		t.Fatalf("failed to get updated annotation: %v", err)
 	}
@@ -594,7 +600,7 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	}
 
 	// 5. EnsureChatWatch
-	chatW, err := s.EnsureChatWatch()
+	chatW, err := s.EnsureChatWatch(ctx)
 	if err != nil {
 		t.Fatalf("failed to ensure chat watch: %v", err)
 	}
@@ -603,7 +609,7 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	}
 
 	// EnsureChatWatch second time returns the same watch
-	chatW2, err := s.EnsureChatWatch()
+	chatW2, err := s.EnsureChatWatch(ctx)
 	if err != nil {
 		t.Fatalf("second ensure chat watch failed: %v", err)
 	}
@@ -612,7 +618,7 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	}
 
 	// 6. Chat message deduplication
-	seen, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	seen, err := s.HasSeenChatMessage(ctx, chatW.ID, "msg-001")
 	if err != nil {
 		t.Fatalf("has seen failed: %v", err)
 	}
@@ -620,11 +626,11 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 		t.Fatal("expected message not seen yet")
 	}
 
-	if err := s.MarkChatMessageSeen(chatW.ID, "msg-001", "Hola, me interesa"); err != nil {
+	if err := s.MarkChatMessageSeen(ctx, chatW.ID, "msg-001", "Hola, me interesa"); err != nil {
 		t.Fatalf("mark seen failed: %v", err)
 	}
 
-	seenAfter, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	seenAfter, err := s.HasSeenChatMessage(ctx, chatW.ID, "msg-001")
 	if err != nil {
 		t.Fatalf("has seen failed after mark: %v", err)
 	}
@@ -633,10 +639,10 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 	}
 
 	// 7. DeleteSeenItem
-	if err := s.DeleteSeenItem(chatW.ID, "chat_msg:msg-001"); err != nil {
+	if err := s.DeleteSeenItem(ctx, chatW.ID, "chat_msg:msg-001"); err != nil {
 		t.Fatalf("delete seen item failed: %v", err)
 	}
-	seenAfterDelete, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	seenAfterDelete, err := s.HasSeenChatMessage(ctx, chatW.ID, "msg-001")
 	if err != nil || seenAfterDelete {
 		t.Fatalf("expected message not seen after delete, got %v", seenAfterDelete)
 	}
@@ -690,5 +696,110 @@ func TestStoreBlockedUntil(t *testing.T) {
 	}
 	if cleared != nil {
 		t.Fatalf("expected nil after clear, got %v", cleared)
+	}
+}
+
+func TestStore_EventDeliveriesAndUndelivered(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "deliveries.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "test-watch",
+		Target: "reloj",
+	}
+	if err := s.AddWatch(ctx, w); err != nil {
+		t.Fatalf("add watch failed: %v", err)
+	}
+
+	ev := &store.Event{
+		WatchID:     w.ID,
+		EventType:   "ad.new",
+		AdID:        "ad-100",
+		PayloadJSON: `{"title":"Rolex"}`,
+		CreatedAt:   time.Now().UTC(),
+		Delivered:   false,
+	}
+	if err := s.RecordEvent(ctx, ev); err != nil {
+		t.Fatalf("record event failed: %v", err)
+	}
+
+	// 1. GetUndeliveredEvents
+	undelivered, err := s.GetUndeliveredEvents(ctx, w.ID, 10)
+	if err != nil {
+		t.Fatalf("get undelivered failed: %v", err)
+	}
+	if len(undelivered) != 1 || undelivered[0].ID != ev.ID {
+		t.Fatalf("expected 1 undelivered event, got %d", len(undelivered))
+	}
+
+	// 2. Record failed delivery for webhook
+	deliveryErr := errors.New("connection refused")
+	if err := s.RecordDeliveryAttempt(ctx, ev.ID, "webhook-1", deliveryErr); err != nil {
+		t.Fatalf("record delivery failed: %v", err)
+	}
+
+	// Record success for ntfy
+	if err := s.RecordDeliveryAttempt(ctx, ev.ID, "ntfy-1", nil); err != nil {
+		t.Fatalf("record delivery success failed: %v", err)
+	}
+
+	// 3. GetEventDeliveries
+	deliveries, err := s.GetEventDeliveries(ctx, ev.ID)
+	if err != nil {
+		t.Fatalf("get deliveries failed: %v", err)
+	}
+	if len(deliveries) != 2 {
+		t.Fatalf("expected 2 deliveries, got %d", len(deliveries))
+	}
+
+	var webhookDeliv, ntfyDeliv *store.EventDelivery
+	for i := range deliveries {
+		if deliveries[i].SinkName == "webhook-1" {
+			webhookDeliv = &deliveries[i]
+		}
+		if deliveries[i].SinkName == "ntfy-1" {
+			ntfyDeliv = &deliveries[i]
+		}
+	}
+
+	if webhookDeliv == nil || webhookDeliv.Status != "failed" || webhookDeliv.Attempts != 1 || webhookDeliv.LastError != "connection refused" {
+		t.Fatalf("unexpected webhook delivery: %+v", webhookDeliv)
+	}
+	if ntfyDeliv == nil || ntfyDeliv.Status != "delivered" || ntfyDeliv.Attempts != 1 {
+		t.Fatalf("unexpected ntfy delivery: %+v", ntfyDeliv)
+	}
+
+	// 4. Retry webhook -> increments attempts
+	if err := s.RecordDeliveryAttempt(ctx, ev.ID, "webhook-1", nil); err != nil {
+		t.Fatalf("record delivery retry failed: %v", err)
+	}
+	deliveries2, err := s.GetEventDeliveries(ctx, ev.ID)
+	if err != nil {
+		t.Fatalf("get deliveries 2 failed: %v", err)
+	}
+	for _, d := range deliveries2 {
+		if d.SinkName == "webhook-1" {
+			if d.Status != "delivered" || d.Attempts != 2 {
+				t.Fatalf("expected status 'delivered' and attempts 2, got status %q attempts %d", d.Status, d.Attempts)
+			}
+		}
+	}
+
+	// 5. Mark as delivered in events table
+	if err := s.MarkEventsDelivered(ctx, []int64{ev.ID}); err != nil {
+		t.Fatalf("mark delivered failed: %v", err)
+	}
+	undeliveredAfter, err := s.GetUndeliveredEvents(ctx, w.ID, 10)
+	if err != nil {
+		t.Fatalf("get undelivered after failed: %v", err)
+	}
+	if len(undeliveredAfter) != 0 {
+		t.Fatalf("expected 0 undelivered events, got %d", len(undeliveredAfter))
 	}
 }

@@ -49,7 +49,7 @@ func TestEngineSearchDiffing(t *testing.T) {
 		Name:   "macbook-m1",
 		Target: "macbook air m1",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestEngineAdDiffing(t *testing.T) {
 		Name:   "taladro",
 		Target: "999888",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestEngineAdDiffing(t *testing.T) {
 	}
 
 	// 4. Verify watch was paused to prevent infinite removed event storm
-	wReloaded, err := st.GetWatch(w.Name)
+	wReloaded, err := st.GetWatch(context.Background(), w.Name)
 	if err != nil {
 		t.Fatalf("failed to reload watch: %v", err)
 	}
@@ -260,23 +260,31 @@ func TestEngineFavoritesWatch(t *testing.T) {
 	eng := watch.NewEngine(st, client)
 	eng.Sinks = sink
 
-	w := &store.Watch{
+	// 1. Unauthenticated check should fail with KindAuth error
+	wUnauth := &store.Watch{
 		Type:   "favorites",
-		Name:   "my-favorites",
+		Name:   "unauth-favorites",
 		Target: "favorites",
 	}
-	if err := st.AddWatch(w); err != nil {
-		t.Fatalf("failed to add watch: %v", err)
+	if err := st.AddWatch(context.Background(), wUnauth); err != nil {
+		t.Fatalf("failed to add unauth watch: %v", err)
 	}
-
-	// 1. Unauthenticated check should fail with KindAuth error
-	_, err = eng.CheckWatch(context.Background(), w)
+	_, err = eng.CheckWatch(context.Background(), wUnauth)
 	if err == nil {
 		t.Fatal("expected error on unauthenticated favorites check, got nil")
 	}
 
 	// Now set session token
 	client.SessionToken = "valid-token-123"
+
+	w := &store.Watch{
+		Type:   "favorites",
+		Name:   "my-favorites",
+		Target: "favorites",
+	}
+	if err := st.AddWatch(context.Background(), w); err != nil {
+		t.Fatalf("failed to add watch: %v", err)
+	}
 
 	// 2. Initial baseline check
 	currentFavs = []milanuncios.AdItem{
@@ -295,7 +303,7 @@ func TestEngineFavoritesWatch(t *testing.T) {
 		t.Fatalf("expected 0 events on baseline run, got %d", len(res1.Events))
 	}
 
-	seenMap, err := st.GetSeenItems(w.ID)
+	seenMap, err := st.GetSeenItems(context.Background(), w.ID)
 	if err != nil {
 		t.Fatalf("reading seen items: %v", err)
 	}
@@ -390,7 +398,7 @@ func TestEngineCheckAllAbortOnBlocked(t *testing.T) {
 			Name:   fmt.Sprintf("watch-%d", i),
 			Target: fmt.Sprintf("target-%d", i),
 		}
-		if err := st.AddWatch(w); err != nil {
+		if err := st.AddWatch(context.Background(), w); err != nil {
 			t.Fatalf("failed to add watch %d: %v", i, err)
 		}
 	}
@@ -454,7 +462,7 @@ func TestEngineDiffingTransactionalRollback(t *testing.T) {
 		Name:   "tx-watch",
 		Target: "tx target",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
@@ -487,7 +495,7 @@ func TestEngineDiffingTransactionalRollback(t *testing.T) {
 	}
 
 	// Verify rollback: seen items must still only contain "ad-base"
-	seenMap, err := st.GetSeenItems(w.ID)
+	seenMap, err := st.GetSeenItems(context.Background(), w.ID)
 	if err != nil {
 		t.Fatalf("get seen items: %v", err)
 	}
@@ -499,7 +507,7 @@ func TestEngineDiffingTransactionalRollback(t *testing.T) {
 	}
 
 	// Events must be 0
-	events, err := st.ListEvents(w.ID, 50)
+	events, err := st.ListEvents(context.Background(), w.ID, 50)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -517,7 +525,7 @@ func TestEngineDiffingTransactionalRollback(t *testing.T) {
 		t.Fatalf("expected 10 new items and 10 events, got %d items and %d events", resHealthy.NewItems, len(resHealthy.Events))
 	}
 
-	seenMapAfter, err := st.GetSeenItems(w.ID)
+	seenMapAfter, err := st.GetSeenItems(context.Background(), w.ID)
 	if err != nil {
 		t.Fatalf("get seen items after healthy: %v", err)
 	}
@@ -551,7 +559,7 @@ func TestEngineAutomaticRetentionPruning(t *testing.T) {
 		Name:   "prune-watch",
 		Target: "prune target",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
@@ -566,7 +574,7 @@ func TestEngineAutomaticRetentionPruning(t *testing.T) {
 		LastTitle:   "Expired item",
 		RawJSON:     `{}`,
 	}
-	if err := st.UpsertSeenItem(oldItem); err != nil {
+	if err := st.UpsertSeenItem(context.Background(), oldItem); err != nil {
 		t.Fatalf("upsert old item: %v", err)
 	}
 
@@ -581,7 +589,10 @@ func TestEngineAutomaticRetentionPruning(t *testing.T) {
 		t.Fatalf("check watch failed: %v", err)
 	}
 
-	seenMap, err := st.GetSeenItems(w.ID)
+	seenMap, err := st.GetSeenItems(context.Background(), w.ID)
+	if err != nil {
+		t.Fatalf("get seen items: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("get seen items: %v", err)
 	}
@@ -667,7 +678,7 @@ func TestEngineConcurrentSinkDispatchAndTimeout(t *testing.T) {
 		Name:   "test-concurrent",
 		Target: "test",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("add watch: %v", err)
 	}
 
@@ -711,7 +722,7 @@ func TestEngineConcurrentSinkDispatchAndTimeout(t *testing.T) {
 	}
 
 	// Verify events were marked as delivered
-	events, err := st.ListEvents(w.ID, 100)
+	events, err := st.ListEvents(context.Background(), w.ID, 100)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -771,7 +782,7 @@ func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
 		Target: "favorites",
 		Status: "active",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 
@@ -782,7 +793,7 @@ func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
 	}
 
 	// 2. Verify watch was automatically paused in store
-	reloaded, err := st.GetWatch(w.Name)
+	reloaded, err := st.GetWatch(context.Background(), w.Name)
 	if err != nil {
 		t.Fatalf("failed to reload watch: %v", err)
 	}
@@ -791,7 +802,7 @@ func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
 	}
 
 	// 3. Verify event watch.paused was recorded with reason session_expired
-	events, err := st.ListEvents(w.ID, 10)
+	events, err := st.ListEvents(context.Background(), w.ID, 10)
 	if err != nil {
 		t.Fatalf("failed to list events: %v", err)
 	}
@@ -830,7 +841,7 @@ func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
 		Target: "favorites",
 		Status: "active",
 	}
-	if err := st.AddWatch(w2); err != nil {
+	if err := st.AddWatch(context.Background(), w2); err != nil {
 		t.Fatalf("failed to add watch 2: %v", err)
 	}
 
@@ -839,11 +850,292 @@ func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
 		t.Fatal("expected error on expired jwt check, got nil")
 	}
 
-	reloaded2, err := st.GetWatch(w2.Name)
+	reloaded2, err := st.GetWatch(context.Background(), w2.Name)
 	if err != nil {
 		t.Fatalf("failed to reload watch 2: %v", err)
 	}
 	if reloaded2.Status != "paused" {
 		t.Fatalf("expected watch 2 to be paused, got %q", reloaded2.Status)
+	}
+}
+
+func TestEngine_CadenceAndCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{{ID: "1", Title: "Item 1", Price: 100}},
+			Total: 1,
+		})
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "cadence.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	eng := watch.NewEngine(st, client)
+
+	now := time.Now().UTC()
+	checkedRecently := now.Add(-10 * time.Second) // 10s ago
+	checkedLongAgo := now.Add(-70 * time.Second)  // 70s ago
+
+	// w1: interval 300s, checked 10s ago -> should NOT run
+	w1 := &store.Watch{
+		Type:          "search",
+		Name:          "w1-cadence-wait",
+		Target:        "search-1",
+		IntervalSec:   300,
+		LastCheckedAt: &checkedRecently,
+		Status:        "active",
+	}
+	// w2: interval 60s, checked 70s ago -> SHOULD run
+	w2 := &store.Watch{
+		Type:          "search",
+		Name:          "w2-cadence-due",
+		Target:        "search-2",
+		IntervalSec:   60,
+		LastCheckedAt: &checkedLongAgo,
+		Status:        "active",
+	}
+	// w3: interval 300s, LastCheckedAt is nil (first run) -> SHOULD run
+	w3 := &store.Watch{
+		Type:        "search",
+		Name:        "w3-first-run",
+		Target:      "search-3",
+		IntervalSec: 300,
+		Status:      "active",
+	}
+
+	ctx := context.Background()
+	_ = st.AddWatch(ctx, w1)
+	_ = st.AddWatch(ctx, w2)
+	_ = st.AddWatch(ctx, w3)
+	_ = st.UpdateWatchChecked(ctx, w1.ID, checkedRecently)
+	_ = st.UpdateWatchChecked(ctx, w2.ID, checkedLongAgo)
+
+	results, err := eng.CheckAll(ctx)
+	if err != nil {
+		t.Fatalf("CheckAll failed: %v", err)
+	}
+
+	// Only w2 and w3 should have run
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results respecting cadence, got %d", len(results))
+	}
+	ranNames := map[string]bool{
+		results[0].WatchName: true,
+		results[1].WatchName: true,
+	}
+	if !ranNames["w2-cadence-due"] || !ranNames["w3-first-run"] {
+		t.Fatalf("unexpected watches executed: %+v", ranNames)
+	}
+
+	// Verify cancellation: canceled context should return ctx.Err() cleanly and run 0 watches
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	canceledResults, cancelErr := eng.CheckAll(canceledCtx)
+	if cancelErr == nil {
+		t.Fatalf("expected context canceled error, got nil")
+	}
+	if len(canceledResults) != 0 {
+		t.Fatalf("expected 0 results on canceled context, got %d", len(canceledResults))
+	}
+}
+
+type mockPerSinkSender struct {
+	names      []string
+	failSinks  map[string]bool
+	deliveries map[string][]store.Event
+}
+
+func newMockPerSinkSender(names []string) *mockPerSinkSender {
+	return &mockPerSinkSender{
+		names:      names,
+		failSinks:  make(map[string]bool),
+		deliveries: make(map[string][]store.Event),
+	}
+}
+
+func (m *mockPerSinkSender) SinkNames() []string {
+	return m.names
+}
+
+func (m *mockPerSinkSender) Dispatch(ctx context.Context, ev store.Event) []error {
+	var errs []error
+	for _, n := range m.names {
+		if err := m.SendTo(ctx, n, ev); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+func (m *mockPerSinkSender) SendTo(ctx context.Context, name string, ev store.Event) error {
+	if m.failSinks[name] {
+		return fmt.Errorf("sink %s simulated failure", name)
+	}
+	m.deliveries[name] = append(m.deliveries[name], ev)
+	return nil
+}
+
+func TestEngine_PartialDeliveryRetryQueue(t *testing.T) {
+	var currentPrice float64 = 100
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{{ID: "item-retry", Title: "Reloj", Price: currentPrice}},
+			Total: 1,
+		})
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "retry.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	eng := watch.NewEngine(st, client)
+
+	// Configure mock per-sink sender with 2 sinks: sink-ok and sink-flaky
+	sinkSender := newMockPerSinkSender([]string{"sink-ok", "sink-flaky"})
+	eng.Sinks = sinkSender
+
+	ctx := context.Background()
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "retry-watch",
+		Target: "reloj",
+	}
+	if err := st.AddWatch(ctx, w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// 1. First run establishes baseline seen items (no events)
+	if _, err := eng.CheckWatch(ctx, w); err != nil {
+		t.Fatalf("baseline check failed: %v", err)
+	}
+
+	// 2. Make sink-flaky fail, and trigger a price change event
+	sinkSender.failSinks["sink-flaky"] = true
+	currentPrice = 90 // price drop triggers event
+
+	res, err := eng.CheckWatch(ctx, w)
+	if err != nil {
+		t.Fatalf("price drop check: %v", err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(res.Events))
+	}
+	evID := res.Events[0].ID
+
+	// Verify sink-ok received the event, but sink-flaky failed
+	if len(sinkSender.deliveries["sink-ok"]) != 1 {
+		t.Fatalf("expected sink-ok to receive event, got %d", len(sinkSender.deliveries["sink-ok"]))
+	}
+	if len(sinkSender.deliveries["sink-flaky"]) != 0 {
+		t.Fatalf("expected sink-flaky to receive 0 successful deliveries, got %d", len(sinkSender.deliveries["sink-flaky"]))
+	}
+
+	// Check SQLite events table: event must be delivered = 0
+	undelivered, err := st.GetUndeliveredEvents(ctx, w.ID, 10)
+	if err != nil || len(undelivered) != 1 {
+		t.Fatalf("expected 1 undelivered event in store, got %d (err: %v)", len(undelivered), len(undelivered))
+	}
+	if undelivered[0].Delivered {
+		t.Fatalf("expected event delivered to be false")
+	}
+
+	// Check deliveries table
+	delivs, err := st.GetEventDeliveries(ctx, evID)
+	if err != nil || len(delivs) != 2 {
+		t.Fatalf("expected 2 delivery records, got %d", len(delivs))
+	}
+
+	// 3. Fix sink-flaky. Configure RetryBackoff to 0 for instant retry in test
+	sinkSender.failSinks["sink-flaky"] = false
+	eng.RetryBackoff = func(attempts int) time.Duration { return 0 }
+
+	// In the next check, retryUndeliveredForWatch runs
+	if _, err := eng.CheckWatch(ctx, w); err != nil {
+		t.Fatalf("retry check failed: %v", err)
+	}
+
+	// Verify sink-ok was NOT duplicated (still 1 delivery)
+	if len(sinkSender.deliveries["sink-ok"]) != 1 {
+		t.Fatalf("sink-ok received duplicate delivery! got %d, expected 1", len(sinkSender.deliveries["sink-ok"]))
+	}
+	// Verify sink-flaky was retried and received delivery
+	if len(sinkSender.deliveries["sink-flaky"]) != 1 {
+		t.Fatalf("sink-flaky was not retried! got %d, expected 1", len(sinkSender.deliveries["sink-flaky"]))
+	}
+
+	// Check SQLite events table: event should now be marked delivered = 1!
+	undeliveredAfter, err := st.GetUndeliveredEvents(ctx, w.ID, 10)
+	if err != nil || len(undeliveredAfter) != 0 {
+		t.Fatalf("expected 0 undelivered events after retry, got %d", len(undeliveredAfter))
+	}
+}
+
+func TestEngine_BackoffRespected(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "backoff.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	eng := watch.NewEngine(st, client)
+	eng.RetryBackoff = func(attempts int) time.Duration {
+		return 10 * time.Minute // require 10 minutes wait
+	}
+
+	sinkSender := newMockPerSinkSender([]string{"flaky"})
+	sinkSender.failSinks["flaky"] = true
+	eng.Sinks = sinkSender
+
+	ctx := context.Background()
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "backoff-watch",
+		Target: "test",
+	}
+	_ = st.AddWatch(ctx, w)
+
+	ev := &store.Event{
+		WatchID:     w.ID,
+		EventType:   "ad.new",
+		AdID:        "item-1",
+		PayloadJSON: `{"ad":{"title":"Test"}}`,
+		CreatedAt:   time.Now().UTC(),
+		Delivered:   false,
+	}
+	_ = st.RecordEvent(ctx, ev)
+	_ = st.RecordDeliveryAttempt(ctx, ev.ID, "flaky", fmt.Errorf("initial failure"))
+
+	// Now unblock flaky sink, but run CheckWatch immediately (0s elapsed < 10m backoff)
+	sinkSender.failSinks["flaky"] = false
+
+	// Retry should be skipped because backoff has not elapsed
+	_, _ = eng.CheckWatch(ctx, w)
+	if len(sinkSender.deliveries["flaky"]) != 0 {
+		t.Fatalf("expected 0 deliveries while in backoff cooldown, got %d", len(sinkSender.deliveries["flaky"]))
+	}
+
+	// Now lower backoff requirement to 0
+	eng.RetryBackoff = func(attempts int) time.Duration { return 0 }
+	_, _ = eng.CheckWatch(ctx, w)
+	if len(sinkSender.deliveries["flaky"]) != 1 {
+		t.Fatalf("expected delivery after backoff expired, got %d", len(sinkSender.deliveries["flaky"]))
 	}
 }

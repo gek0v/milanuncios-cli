@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -135,7 +136,7 @@ func TestWatchCircuitBreakerPersistence(t *testing.T) {
 		Name:   "test-watch",
 		Target: "portatil",
 	}
-	if err := st.AddWatch(w); err != nil {
+	if err := st.AddWatch(context.Background(), w); err != nil {
 		t.Fatalf("failed to add watch: %v", err)
 	}
 	st.Close()

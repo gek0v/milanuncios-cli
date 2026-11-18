@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,6 +18,32 @@ import (
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/gek0v/milanuncios-cli/internal/store"
 )
+
+// Option configures sinks.
+type Option func(*options)
+
+type options struct {
+	transport http.RoundTripper
+}
+
+// WithTransport configures a custom HTTP transport (e.g. for proxy support).
+func WithTransport(tr http.RoundTripper) Option {
+	return func(o *options) {
+		o.transport = tr
+	}
+}
+
+// IsSafeClickURL validates that a click URL strictly points to milanuncios.com over HTTPS.
+func IsSafeClickURL(raw string) bool {
+	if !strings.HasPrefix(raw, "https://www.milanuncios.com/") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && (u.Host == "www.milanuncios.com" || u.Hostname() == "www.milanuncios.com")
+}
 
 // Sink represents an external notification target for watch events.
 type Sink interface {
@@ -34,7 +61,7 @@ type NtfySink struct {
 }
 
 // NewNtfySink creates an ntfy notification sink.
-func NewNtfySink(name string, serverURL, topic string) (*NtfySink, error) {
+func NewNtfySink(name string, serverURL, topic string, opts ...Option) (*NtfySink, error) {
 	if topic == "" {
 		return nil, output.Usagef("ntfy sink requires a topic")
 	}
@@ -43,11 +70,21 @@ func NewNtfySink(name string, serverURL, topic string) (*NtfySink, error) {
 	}
 	serverURL = strings.TrimRight(serverURL, "/")
 
+	var opt options
+	for _, fn := range opts {
+		fn(&opt)
+	}
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if opt.transport != nil {
+		httpClient.Transport = opt.transport
+	}
+
 	return &NtfySink{
 		name:   name,
 		url:    serverURL,
 		topic:  topic,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: httpClient,
 	}, nil
 }
 
@@ -95,7 +132,7 @@ func (s *NtfySink) Send(ctx context.Context, ev store.Event) error {
 
 	req.Header.Set("Title", title)
 	req.Header.Set("Tags", tags)
-	if clickURL != "" {
+	if clickURL != "" && IsSafeClickURL(clickURL) {
 		req.Header.Set("Click", clickURL)
 	}
 
@@ -123,9 +160,14 @@ type WebhookSink struct {
 }
 
 // NewWebhookSink creates an HTTP webhook sink.
-func NewWebhookSink(name, targetURL, tokenFile string) (*WebhookSink, error) {
+func NewWebhookSink(name, targetURL, tokenFile string, opts ...Option) (*WebhookSink, error) {
 	if targetURL == "" {
 		return nil, output.Usagef("webhook sink requires a url")
+	}
+
+	var opt options
+	for _, fn := range opts {
+		fn(&opt)
 	}
 
 	allowPrivate := os.Getenv("MILANUNCIOS_ALLOW_PRIVATE_IPS") == "true"
@@ -133,11 +175,16 @@ func NewWebhookSink(name, targetURL, tokenFile string) (*WebhookSink, error) {
 		return nil, output.Usagef("webhook destination url %q blocked: %v", targetURL, err)
 	}
 
+	client := createSafeWebhookClient(allowPrivate)
+	if opt.transport != nil {
+		client.Transport = opt.transport
+	}
+
 	return &WebhookSink{
 		name:            name,
 		url:             targetURL,
 		tokenFile:       tokenFile,
-		client:          createSafeWebhookClient(allowPrivate),
+		client:          client,
 		allowPrivateIPs: allowPrivate,
 	}, nil
 }
@@ -242,12 +289,12 @@ func (s *ExecSink) Send(ctx context.Context, ev store.Event) error {
 }
 
 // FromConfig instantiates a Sink from configuration.
-func FromConfig(name string, cfg config.SinkConfig) (Sink, error) {
+func FromConfig(name string, cfg config.SinkConfig, opts ...Option) (Sink, error) {
 	switch strings.ToLower(cfg.Type) {
 	case "ntfy":
-		return NewNtfySink(name, cfg.URL, cfg.Topic)
+		return NewNtfySink(name, cfg.URL, cfg.Topic, opts...)
 	case "webhook":
-		return NewWebhookSink(name, cfg.URL, cfg.TokenFile)
+		return NewWebhookSink(name, cfg.URL, cfg.TokenFile, opts...)
 	case "exec":
 		return NewExecSink(name, cfg.Command)
 	default:
@@ -261,10 +308,10 @@ type Manager struct {
 }
 
 // NewManager builds a Manager from config sinks map.
-func NewManager(cfgSinks map[string]config.SinkConfig) (*Manager, error) {
+func NewManager(cfgSinks map[string]config.SinkConfig, opts ...Option) (*Manager, error) {
 	var sinks []Sink
 	for name, sc := range cfgSinks {
-		s, err := FromConfig(name, sc)
+		s, err := FromConfig(name, sc, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -276,6 +323,59 @@ func NewManager(cfgSinks map[string]config.SinkConfig) (*Manager, error) {
 // Sinks returns the list of loaded sinks.
 func (m *Manager) Sinks() []Sink {
 	return m.sinks
+}
+
+// SinkNames returns the list of names of all configured sinks.
+func (m *Manager) SinkNames() []string {
+	names := make([]string, len(m.sinks))
+	for i, s := range m.sinks {
+		names[i] = s.Name()
+	}
+	return names
+}
+
+// SendTo delivers an event to a single named sink.
+func (m *Manager) SendTo(ctx context.Context, name string, ev store.Event) error {
+	for _, s := range m.sinks {
+		if s.Name() == name {
+			return s.Send(ctx, ev)
+		}
+	}
+	return fmt.Errorf("sink %q not found", name)
+}
+
+// DispatchPerSink dispatches to specified sinks (or all if targets is empty) and returns individual results.
+func (m *Manager) DispatchPerSink(ctx context.Context, ev store.Event, targets []string) map[string]error {
+	results := make(map[string]error)
+	targetSinks := m.sinks
+	if len(targets) > 0 {
+		set := make(map[string]bool, len(targets))
+		for _, name := range targets {
+			set[name] = true
+		}
+		var filtered []Sink
+		for _, s := range m.sinks {
+			if set[s.Name()] {
+				filtered = append(filtered, s)
+			}
+		}
+		targetSinks = filtered
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, s := range targetSinks {
+		wg.Add(1)
+		go func(s Sink) {
+			defer wg.Done()
+			err := s.Send(ctx, ev)
+			mu.Lock()
+			results[s.Name()] = err
+			mu.Unlock()
+		}(s)
+	}
+	wg.Wait()
+	return results
 }
 
 // Dispatch sends the event to all configured sinks concurrently.

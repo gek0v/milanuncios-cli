@@ -767,9 +767,13 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		if s.Store == nil {
 			return nil, fmt.Errorf("store not configured")
 		}
-		adID := normalizeString(args["ad_id"])
-		if adID == "" {
+		rawAdID := normalizeString(args["ad_id"])
+		if rawAdID == "" {
 			return nil, fmt.Errorf("ad_id is required")
+		}
+		adID, err := milanuncios.ExtractAdID(rawAdID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ad ID or URL: %w", err)
 		}
 		tag, _ := args["tag"].(string)
 		tag = strings.TrimSpace(tag)
@@ -783,10 +787,10 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		} else if sVal, ok := args["target_price"].(string); ok {
 			targetPrice, _ = strconv.ParseFloat(sVal, 64)
 		}
-		if err := s.Store.SaveAnnotation(adID, tag, note, targetPrice); err != nil {
+		if err := s.Store.SaveAnnotation(ctx, adID, tag, note, targetPrice); err != nil {
 			return nil, err
 		}
-		ann, err := s.Store.GetAnnotation(adID)
+		ann, err := s.Store.GetAnnotation(ctx, adID)
 		if err != nil {
 			res := map[string]any{
 				"ad_id":        adID,
@@ -831,7 +835,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			return nil, fmt.Errorf("watch store not configured")
 		}
 
-		list, err := s.Store.ListWatches()
+		list, err := s.Store.ListWatches(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -848,7 +852,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 
 		target := normalizeString(args["watch"])
 		if target != "" {
-			w, err := s.Store.GetWatch(target)
+			w, err := s.Store.GetWatch(ctx, target)
 			if err != nil {
 				return nil, err
 			}
@@ -888,7 +892,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			limit = 50
 		}
 
-		events, err := s.Store.ListEvents(watchID, limit)
+		events, err := s.Store.ListEvents(ctx, watchID, limit)
 		if err != nil {
 			return nil, err
 		}

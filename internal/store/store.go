@@ -56,6 +56,16 @@ type Event struct {
 	Delivered   bool      `json:"delivered"`
 }
 
+// EventDelivery tracks notification delivery state and retry attempts per sink.
+type EventDelivery struct {
+	EventID       int64     `json:"event_id"`
+	SinkName      string    `json:"sink_name"`
+	Status        string    `json:"status"` // "delivered", "failed"
+	Attempts      int       `json:"attempts"`
+	LastAttemptAt time.Time `json:"last_attempt_at"`
+	LastError     string    `json:"last_error,omitempty"`
+}
+
 // WatchList wraps a slice of watches with Pretty rendering.
 type WatchList []Watch
 
@@ -248,6 +258,17 @@ func (s *Store) migrate() error {
 		FOREIGN KEY (watch_id) REFERENCES watches(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS event_deliveries (
+		event_id INTEGER NOT NULL,
+		sink_name TEXT NOT NULL,
+		status TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_attempt_at TEXT NOT NULL,
+		last_error TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (event_id, sink_name),
+		FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+	);
+
 	CREATE TABLE IF NOT EXISTS favorite_annotations (
 		ad_id TEXT PRIMARY KEY,
 		tag TEXT NOT NULL,
@@ -267,6 +288,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_seen_items_last_seen ON seen_items(last_seen_at);
 	CREATE INDEX IF NOT EXISTS idx_events_watch ON events(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered);
+	CREATE INDEX IF NOT EXISTS idx_event_deliveries_sink ON event_deliveries(sink_name, status);
 	CREATE INDEX IF NOT EXISTS idx_fav_annotations_tag ON favorite_annotations(tag);
 	`
 	var err error
@@ -284,7 +306,7 @@ func (s *Store) migrate() error {
 }
 
 // AddWatch inserts a new watch.
-func (s *Store) AddWatch(w *Watch) error {
+func (s *Store) AddWatch(ctx context.Context, w *Watch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -303,7 +325,7 @@ func (s *Store) AddWatch(w *Watch) error {
 	INSERT INTO watches (type, name, target, query_json, interval_sec, created_at, status)
 	VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
-	res, err := s.db.Exec(query, w.Type, w.Name, w.Target, w.QueryJSON, w.IntervalSec, w.CreatedAt.Format(time.RFC3339), w.Status)
+	res, err := s.db.ExecContext(ctx, query, w.Type, w.Name, w.Target, w.QueryJSON, w.IntervalSec, w.CreatedAt.Format(time.RFC3339), w.Status)
 	if err != nil {
 		return err
 	}
@@ -316,18 +338,18 @@ func (s *Store) AddWatch(w *Watch) error {
 }
 
 // GetWatch retrieves a watch by numeric ID or exact name.
-func (s *Store) GetWatch(idOrName string) (*Watch, error) {
+func (s *Store) GetWatch(ctx context.Context, idOrName string) (*Watch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.getWatchLocked(idOrName)
+	return s.getWatchLocked(ctx, idOrName)
 }
 
 // ListWatches returns all configured watches.
-func (s *Store) ListWatches() (WatchList, error) {
+func (s *Store) ListWatches(ctx context.Context) (WatchList, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rows, err := s.db.Query(`SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status FROM watches ORDER BY id ASC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status FROM watches ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -359,11 +381,11 @@ func (s *Store) ListWatches() (WatchList, error) {
 }
 
 // UpdateWatchStatus sets status ("active", "paused") for a watch.
-func (s *Store) UpdateWatchStatus(id int64, status string) error {
+func (s *Store) UpdateWatchStatus(ctx context.Context, id int64, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	res, err := s.db.Exec(`UPDATE watches SET status = ? WHERE id = ?`, status, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE watches SET status = ? WHERE id = ?`, status, id)
 	if err != nil {
 		return err
 	}
@@ -378,37 +400,37 @@ func (s *Store) UpdateWatchStatus(id int64, status string) error {
 }
 
 // UpdateWatchChecked records the timestamp of a completed watch check.
-func (s *Store) UpdateWatchChecked(id int64, at time.Time) error {
+func (s *Store) UpdateWatchChecked(ctx context.Context, id int64, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`UPDATE watches SET last_checked_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
+	_, err := s.db.ExecContext(ctx, `UPDATE watches SET last_checked_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
 	return err
 }
 
 // DeleteWatch removes a watch and its associated seen items and events.
-func (s *Store) DeleteWatch(idOrName string) error {
+func (s *Store) DeleteWatch(ctx context.Context, idOrName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	w, err := s.getWatchLocked(idOrName)
+	w, err := s.getWatchLocked(ctx, idOrName)
 	if err != nil {
 		return err
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`DELETE FROM seen_items WHERE watch_id = ?`, w.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM seen_items WHERE watch_id = ?`, w.ID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM events WHERE watch_id = ?`, w.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE watch_id = ?`, w.ID); err != nil {
 		return err
 	}
-	res, err := tx.Exec(`DELETE FROM watches WHERE id = ?`, w.ID)
+	res, err := tx.ExecContext(ctx, `DELETE FROM watches WHERE id = ?`, w.ID)
 	if err != nil {
 		return err
 	}
@@ -422,11 +444,11 @@ func (s *Store) DeleteWatch(idOrName string) error {
 	return tx.Commit()
 }
 
-func (s *Store) getWatchLocked(idOrName string) (*Watch, error) {
+func (s *Store) getWatchLocked(ctx context.Context, idOrName string) (*Watch, error) {
 	trimmed := strings.TrimSpace(idOrName)
 	query := `SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status FROM watches WHERE id = ? OR name = ? LIMIT 1`
 
-	row := s.db.QueryRow(query, trimmed, trimmed)
+	row := s.db.QueryRowContext(ctx, query, trimmed, trimmed)
 	var w Watch
 	var lastCheckedStr sql.NullString
 	var createdStr string
@@ -453,11 +475,11 @@ func (s *Store) getWatchLocked(idOrName string) (*Watch, error) {
 
 // GetSeenItems returns map of ad_id -> SeenItem for a given watch.
 // Omits raw_json to conserve memory during diffing cycles.
-func (s *Store) GetSeenItems(watchID int64) (map[string]SeenItem, error) {
+func (s *Store) GetSeenItems(ctx context.Context, watchID int64) (map[string]SeenItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rows, err := s.db.Query(`SELECT watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title FROM seen_items WHERE watch_id = ?`, watchID)
+	rows, err := s.db.QueryContext(ctx, `SELECT watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title FROM seen_items WHERE watch_id = ?`, watchID)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +555,7 @@ func (s *Store) PruneSeenItems(olderThan time.Duration) (int64, error) {
 }
 
 // UpsertSeenItem records or updates a seen ad.
-func (s *Store) UpsertSeenItem(it *SeenItem) error {
+func (s *Store) UpsertSeenItem(ctx context.Context, it *SeenItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -546,7 +568,7 @@ func (s *Store) UpsertSeenItem(it *SeenItem) error {
 		last_title = excluded.last_title,
 		raw_json = excluded.raw_json
 	`
-	_, err := s.db.Exec(query,
+	_, err := s.db.ExecContext(ctx, query,
 		it.WatchID,
 		it.AdID,
 		it.FirstSeenAt.UTC().Format(time.RFC3339),
@@ -559,7 +581,7 @@ func (s *Store) UpsertSeenItem(it *SeenItem) error {
 }
 
 // RecordEvent saves a detected event to SQLite.
-func (s *Store) RecordEvent(ev *Event) error {
+func (s *Store) RecordEvent(ctx context.Context, ev *Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -577,7 +599,7 @@ func (s *Store) RecordEvent(ev *Event) error {
 	INSERT INTO events (watch_id, event_type, ad_id, payload_json, created_at, delivered)
 	VALUES (?, ?, ?, ?, ?, ?)
 	`
-	res, err := s.db.Exec(query, ev.WatchID, ev.EventType, ev.AdID, ev.PayloadJSON, ev.CreatedAt.Format(time.RFC3339), delivInt)
+	res, err := s.db.ExecContext(ctx, query, ev.WatchID, ev.EventType, ev.AdID, ev.PayloadJSON, ev.CreatedAt.Format(time.RFC3339), delivInt)
 	if err != nil {
 		return err
 	}
@@ -590,7 +612,7 @@ func (s *Store) RecordEvent(ev *Event) error {
 }
 
 // ListEvents queries events with optional watchID filter and limit.
-func (s *Store) ListEvents(watchID int64, limit int) (EventList, error) {
+func (s *Store) ListEvents(ctx context.Context, watchID int64, limit int) (EventList, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -602,9 +624,9 @@ func (s *Store) ListEvents(watchID int64, limit int) (EventList, error) {
 	var err error
 
 	if watchID > 0 {
-		rows, err = s.db.Query(`SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events WHERE watch_id = ? ORDER BY id DESC LIMIT ?`, watchID, limit)
+		rows, err = s.db.QueryContext(ctx, `SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events WHERE watch_id = ? ORDER BY id DESC LIMIT ?`, watchID, limit)
 	} else {
-		rows, err = s.db.Query(`SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events ORDER BY id DESC LIMIT ?`, limit)
+		rows, err = s.db.QueryContext(ctx, `SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events ORDER BY id DESC LIMIT ?`, limit)
 	}
 
 	if err != nil {
@@ -633,7 +655,7 @@ func (s *Store) ListEvents(watchID int64, limit int) (EventList, error) {
 }
 
 // MarkEventsDelivered marks event IDs as delivered.
-func (s *Store) MarkEventsDelivered(ids []int64) error {
+func (s *Store) MarkEventsDelivered(ctx context.Context, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -648,16 +670,106 @@ func (s *Store) MarkEventsDelivered(ids []int64) error {
 	}
 
 	query := fmt.Sprintf(`UPDATE events SET delivered = 1 WHERE id IN (%s)`, placeholders)
-	_, err := s.db.Exec(query, args...)
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }
 
-// DeleteSeenItem removes a seen item record from SQLite (e.g. when an ad is removed from favorites).
-func (s *Store) DeleteSeenItem(watchID int64, adID string) error {
+// GetUndeliveredEvents returns events with delivered = 0 for a watch (or all watches if watchID == 0).
+func (s *Store) GetUndeliveredEvents(ctx context.Context, watchID int64, limit int) (EventList, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`DELETE FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, adID)
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var rows *sql.Rows
+	var err error
+	if watchID > 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events WHERE delivered = 0 AND watch_id = ? ORDER BY id ASC LIMIT ?`, watchID, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT id, watch_id, event_type, ad_id, payload_json, created_at, delivered FROM events WHERE delivered = 0 ORDER BY id ASC LIMIT ?`, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list EventList
+	for rows.Next() {
+		var ev Event
+		var createdStr string
+		var delivInt int
+		if err := rows.Scan(&ev.ID, &ev.WatchID, &ev.EventType, &ev.AdID, &ev.PayloadJSON, &createdStr, &delivInt); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+			ev.CreatedAt = t
+		}
+		ev.Delivered = delivInt == 1
+		list = append(list, ev)
+	}
+	return list, rows.Err()
+}
+
+// RecordDeliveryAttempt tracks or updates delivery status and backoff for a sink and event.
+func (s *Store) RecordDeliveryAttempt(ctx context.Context, eventID int64, sinkName string, deliveryErr error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	status := "delivered"
+	errMsg := ""
+	if deliveryErr != nil {
+		status = "failed"
+		errMsg = deliveryErr.Error()
+	}
+
+	query := `
+	INSERT INTO event_deliveries (event_id, sink_name, status, attempts, last_attempt_at, last_error)
+	VALUES (?, ?, ?, 1, ?, ?)
+	ON CONFLICT(event_id, sink_name) DO UPDATE SET
+		status = excluded.status,
+		attempts = event_deliveries.attempts + 1,
+		last_attempt_at = excluded.last_attempt_at,
+		last_error = excluded.last_error
+	`
+	_, err := s.db.ExecContext(ctx, query, eventID, sinkName, status, now, errMsg)
+	return err
+}
+
+// GetEventDeliveries returns delivery attempts per sink for a given event ID.
+func (s *Store) GetEventDeliveries(ctx context.Context, eventID int64) ([]EventDelivery, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id, sink_name, status, attempts, last_attempt_at, last_error FROM event_deliveries WHERE event_id = ?`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []EventDelivery
+	for rows.Next() {
+		var ed EventDelivery
+		var lastAttemptStr string
+		if err := rows.Scan(&ed.EventID, &ed.SinkName, &ed.Status, &ed.Attempts, &lastAttemptStr, &ed.LastError); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339, lastAttemptStr); err == nil {
+			ed.LastAttemptAt = t
+		}
+		list = append(list, ed)
+	}
+	return list, rows.Err()
+}
+
+// DeleteSeenItem removes a seen item record from SQLite (e.g. when an ad is removed from favorites).
+func (s *Store) DeleteSeenItem(ctx context.Context, watchID int64, adID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, adID)
 	return err
 }
 
@@ -787,7 +899,7 @@ func (t *Tx) UpdateWatchStatus(id int64, status string) error {
 }
 
 // SaveAnnotation stores or updates agent notes and metadata for an ad.
-func (s *Store) SaveAnnotation(adID, tag, note string, targetPrice float64) error {
+func (s *Store) SaveAnnotation(ctx context.Context, adID, tag, note string, targetPrice float64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -801,19 +913,19 @@ func (s *Store) SaveAnnotation(adID, tag, note string, targetPrice float64) erro
 		target_price = excluded.target_price,
 		updated_at = excluded.updated_at
 	`
-	_, err := s.db.Exec(query, adID, tag, note, targetPrice, now)
+	_, err := s.db.ExecContext(ctx, query, adID, tag, note, targetPrice, now)
 	return err
 }
 
 // GetAnnotation retrieves the local annotation for an ad, or ErrNotFound if absent.
-func (s *Store) GetAnnotation(adID string) (*FavoriteAnnotation, error) {
+func (s *Store) GetAnnotation(ctx context.Context, adID string) (*FavoriteAnnotation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var fa FavoriteAnnotation
 	var updatedStr string
 	query := `SELECT ad_id, tag, note, target_price, updated_at FROM favorite_annotations WHERE ad_id = ? LIMIT 1`
-	err := s.db.QueryRow(query, adID).Scan(&fa.AdID, &fa.Tag, &fa.Note, &fa.TargetPrice, &updatedStr)
+	err := s.db.QueryRowContext(ctx, query, adID).Scan(&fa.AdID, &fa.Tag, &fa.Note, &fa.TargetPrice, &updatedStr)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -828,12 +940,12 @@ func (s *Store) GetAnnotation(adID string) (*FavoriteAnnotation, error) {
 }
 
 // EnsureChatWatch returns the existing chat watch or creates one atomically if it doesn't exist.
-func (s *Store) EnsureChatWatch() (*Watch, error) {
+func (s *Store) EnsureChatWatch(ctx context.Context) (*Watch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO watches (type, name, target, query_json, interval_sec, created_at, status)
 		VALUES ('chat', 'chat_monitor', 'conversations', '{}', 30, ?, 'active')
 		ON CONFLICT(name) DO NOTHING
@@ -846,7 +958,7 @@ func (s *Store) EnsureChatWatch() (*Watch, error) {
 	var lastCheckedStr sql.NullString
 	var createdStr string
 
-	err = s.db.QueryRow(`
+	err = s.db.QueryRowContext(ctx, `
 		SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status
 		FROM watches WHERE name = 'chat_monitor' LIMIT 1
 	`).Scan(&w.ID, &w.Type, &w.Name, &w.Target, &w.QueryJSON, &w.IntervalSec, &lastCheckedStr, &createdStr, &w.Status)
@@ -866,12 +978,12 @@ func (s *Store) EnsureChatWatch() (*Watch, error) {
 }
 
 // HasSeenChatMessage returns true if a message ID has already been recorded for this chat watch.
-func (s *Store) HasSeenChatMessage(watchID int64, msgID string) (bool, error) {
+func (s *Store) HasSeenChatMessage(ctx context.Context, watchID int64, msgID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, "chat_msg:"+msgID).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, "chat_msg:"+msgID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -879,12 +991,12 @@ func (s *Store) HasSeenChatMessage(watchID int64, msgID string) (bool, error) {
 }
 
 // MarkChatMessageSeen records a message ID as seen for this chat watch.
-func (s *Store) MarkChatMessageSeen(watchID int64, msgID string, text string) error {
+func (s *Store) MarkChatMessageSeen(ctx context.Context, watchID int64, msgID string, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO seen_items (watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title, raw_json)
 		VALUES (?, ?, ?, ?, 0, ?, '{}')
 		ON CONFLICT(watch_id, ad_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
