@@ -89,10 +89,10 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Save serializes the configuration to disk with 0644 permissions.
+// Save serializes the configuration to disk with strict 0600 permissions.
 func Save(path string, cfg *Config) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
@@ -101,7 +101,8 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("serializing config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// 0600: read/write for owner only
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}
 

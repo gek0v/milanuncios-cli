@@ -482,6 +482,21 @@ func levenshteinDistance(s1, s2 string) int {
 // base64 data URI, or existing media ID, streams it as multipart/form-data to POST /api/v1/media/upload,
 // and returns the uploaded photo metadata.
 func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*UploadedPhoto, error) {
+	if c.IsBlocked() {
+		until := c.BlockedUntil()
+		msg := "request paused: milanuncios circuit breaker is active"
+		if until != nil {
+			msg = fmt.Sprintf("request paused: milanuncios circuit breaker is active until %s", until.Local().Format("15:04:05"))
+		}
+		return nil, &output.DomainError{
+			Kind:      output.KindBlocked,
+			Status:    http.StatusTooManyRequests,
+			Endpoint:  "POST /api/v1/media/upload",
+			Retryable: false,
+			Msg:       msg,
+		}
+	}
+
 	trimmed := strings.TrimSpace(photoRef)
 	if trimmed == "" {
 		return nil, output.Usagef("photo reference cannot be empty")
@@ -635,7 +650,9 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 	req.Header.Set("Content-Type", mpWriter.FormDataContentType())
 	if c.SessionToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.SessionToken)
-		req.Header.Set("Cookie", "token="+c.SessionToken)
+	}
+	if ck := c.cookieHeader(true); ck != "" {
+		req.Header.Set("Cookie", ck)
 	}
 
 	resp, err := c.HTTP.Do(req)
@@ -643,6 +660,12 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 		return nil, c.wrapNetError("POST /api/v1/media/upload", err)
 	}
 	defer resp.Body.Close()
+
+	for _, ck := range resp.Cookies() {
+		if isWAFCookie(ck.Name) {
+			c.SetCookie(ck.Name, ck.Value)
+		}
+	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
@@ -658,15 +681,18 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 		}
 	}
 	if isBotStatus(resp.StatusCode, raw) {
+		cooldown := parseCooldown(resp)
+		until := time.Now().Add(cooldown)
+		c.SetBlockedUntil(until)
 		if c.OnBlock != nil {
-			c.OnBlock(ctx)
+			c.OnBlock(until)
 		}
 		return nil, &output.DomainError{
 			Kind:      output.KindBlocked,
 			Status:    resp.StatusCode,
 			Endpoint:  "POST /api/v1/media/upload",
-			Retryable: true,
-			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
+			Retryable: false,
+			Msg:       fmt.Sprintf("milanuncios blocked or rate-limited the request. Wait until %s before retrying", until.Local().Format("15:04:05")),
 		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

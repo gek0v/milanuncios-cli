@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
+	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 )
 
@@ -523,6 +524,75 @@ func TestAuthAndProfileCommands(t *testing.T) {
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("profile list failed: %v", err)
 		}
+	}
+}
+
+func TestAuthLoginWithWAFCookies(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/me" {
+			ck := r.Header.Get("Cookie")
+			if !strings.Contains(ck, "datadome=dd-waf-cookie-123") {
+				t.Errorf("expected datadome in Cookie header, got: %s", ck)
+			}
+			user := milanuncios.UserProfile{
+				ID:    "usr-waf",
+				Name:  "Test WAF User",
+				Email: "waf@example.com",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(user)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials.toml")
+	cookiesFile := filepath.Join(tmpDir, "cookies.json")
+	t.Setenv("MILANUNCIOS_CREDENTIALS_FILE", credFile)
+	t.Setenv("MILANUNCIOS_SESSION_TOKEN", "")
+
+	cookiesJSON := `[
+		{"name": "token", "value": "jwt-waf-token-xyz"},
+		{"name": "datadome", "value": "dd-waf-cookie-123"},
+		{"name": "cf_clearance", "value": "cf-waf-cookie-456"}
+	]`
+	if err := os.WriteFile(cookiesFile, []byte(cookiesJSON), 0600); err != nil {
+		t.Fatalf("failed to write cookies file: %v", err)
+	}
+
+	app := cli.NewApp("test")
+	app.Client.BaseURL = ts.URL
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"auth", "login", "--cookies", cookiesFile, "--format", "json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("auth login failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	creds, err := config.LoadCredentials(credFile)
+	if err != nil {
+		t.Fatalf("failed to load credentials: %v", err)
+	}
+	p, ok := creds.Profiles["default"]
+	if !ok {
+		t.Fatal("profile 'default' not found in credentials")
+	}
+	if p.SessionToken != "jwt-waf-token-xyz" {
+		t.Errorf("expected session token 'jwt-waf-token-xyz', got %q", p.SessionToken)
+	}
+	if p.Cookies["datadome"] != "dd-waf-cookie-123" {
+		t.Errorf("expected datadome 'dd-waf-cookie-123', got %q", p.Cookies["datadome"])
+	}
+	if p.Cookies["cf_clearance"] != "cf-waf-cookie-456" {
+		t.Errorf("expected cf_clearance 'cf-waf-cookie-456', got %q", p.Cookies["cf_clearance"])
 	}
 }
 

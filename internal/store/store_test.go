@@ -278,3 +278,54 @@ func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
 		t.Fatalf("expected message not seen after delete, got %v", seenAfterDelete)
 	}
 }
+
+func TestStoreBlockedUntil(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_blocked.db")
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// Initial check should be nil
+	until, err := s.GetBlockedUntil()
+	if err != nil {
+		t.Fatalf("expected nil error on empty state, got %v", err)
+	}
+	if until != nil {
+		t.Fatalf("expected nil until, got %v", until)
+	}
+
+	// Set blocked until
+	targetTime := time.Now().Add(15 * time.Minute).Truncate(time.Second).UTC()
+	if err := s.SetBlockedUntil(targetTime); err != nil {
+		t.Fatalf("set blocked until failed: %v", err)
+	}
+
+	// Retrieve
+	stored, err := s.GetBlockedUntil()
+	if err != nil {
+		t.Fatalf("get blocked until failed: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected non-nil until")
+	}
+	if !stored.Equal(targetTime) {
+		t.Fatalf("expected %v, got %v", targetTime, *stored)
+	}
+
+	// Clear
+	if err := s.ClearBlockedUntil(); err != nil {
+		t.Fatalf("clear blocked until failed: %v", err)
+	}
+
+	cleared, err := s.GetBlockedUntil()
+	if err != nil {
+		t.Fatalf("get after clear failed: %v", err)
+	}
+	if cleared != nil {
+		t.Fatalf("expected nil after clear, got %v", cleared)
+	}
+}

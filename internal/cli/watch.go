@@ -498,16 +498,55 @@ func (a *App) watchRunCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			fmt.Fprintf(a.Stderr, "milanuncios-cli watch engine running (interval: %ds). Press Ctrl+C to stop.\n", sec)
+			var blockedUntil time.Time
+			if stored, err := st.GetBlockedUntil(); err == nil && stored != nil {
+				if time.Now().Before(*stored) {
+					blockedUntil = *stored
+					a.Client.SetBlockedUntil(*stored)
+					fmt.Fprintf(a.Stderr, "circuit breaker active: cooling down until %s\n", stored.Local().Format("15:04:05"))
+				}
+			}
 
-			// Initial check on start
-			if results, err := eng.CheckAll(ctx); err == nil {
+			prevOnBlock := a.Client.OnBlock
+			a.Client.OnBlock = func(until time.Time) {
+				blockedUntil = until
+				_ = st.SetBlockedUntil(until)
+				if prevOnBlock != nil {
+					prevOnBlock(until)
+				}
+				fmt.Fprintf(a.Stderr, "circuit breaker triggered: paused until %s\n", until.Local().Format("15:04:05"))
+			}
+
+			runCycle := func() {
+				if !blockedUntil.IsZero() && time.Now().Before(blockedUntil) {
+					fmt.Fprintf(a.Stderr, "watch check paused (cooling down until %s)\n", blockedUntil.Local().Format("15:04:05"))
+					return
+				}
+				results, err := eng.CheckAll(ctx)
+				if err != nil {
+					if output.IsKind(err, output.KindBlocked) {
+						fmt.Fprintf(a.Stderr, "watch check aborted due to anti-bot block (cooling down until %s)\n", blockedUntil.Local().Format("15:04:05"))
+						return
+					}
+					fmt.Fprintf(a.Stderr, "watch check error: %v\n", err)
+					return
+				}
+				if !blockedUntil.IsZero() && time.Now().After(blockedUntil) {
+					blockedUntil = time.Time{}
+					_ = st.ClearBlockedUntil()
+					a.Client.ClearBlock()
+				}
 				for _, r := range results {
 					if len(r.Events) > 0 {
 						_ = a.Printer.Print(r.Events)
 					}
 				}
 			}
+
+			fmt.Fprintf(a.Stderr, "milanuncios-cli watch engine running (interval: %ds). Press Ctrl+C to stop.\n", sec)
+
+			// Initial check on start
+			runCycle()
 
 			for {
 				select {
@@ -518,16 +557,7 @@ func (a *App) watchRunCmd() *cobra.Command {
 						Msg:  "watch daemon interrupted by signal",
 					}
 				case <-ticker.C:
-					results, err := eng.CheckAll(ctx)
-					if err != nil {
-						fmt.Fprintf(a.Stderr, "watch check error: %v\n", err)
-						continue
-					}
-					for _, r := range results {
-						if len(r.Events) > 0 {
-							_ = a.Printer.Print(r.Events)
-						}
-					}
+					runCycle()
 				}
 			}
 		},

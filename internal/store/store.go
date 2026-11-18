@@ -252,6 +252,12 @@ func (s *Store) migrate() error {
 		updated_at TEXT NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS app_state (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_seen_items_watch ON seen_items(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_watch ON events(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered);
@@ -710,6 +716,68 @@ func (s *Store) MarkChatMessageSeen(watchID int64, msgID string, text string) er
 		VALUES (?, ?, ?, ?, 0, ?, '{}')
 		ON CONFLICT(watch_id, ad_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
 	`, watchID, "chat_msg:"+msgID, now, now, output.Truncate(text, 50))
+	return err
+}
+
+// SetState records a key-value pair in app_state.
+func (s *Store) SetState(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `
+	INSERT INTO app_state (key, value, updated_at)
+	VALUES (?, ?, ?)
+	ON CONFLICT(key) DO UPDATE SET
+		value = excluded.value,
+		updated_at = excluded.updated_at
+	`
+	_, err := s.db.Exec(query, key, value, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// GetState reads a key-value pair from app_state. Returns ErrNotFound if not present.
+func (s *Store) GetState(key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var val string
+	err := s.db.QueryRow(`SELECT value FROM app_state WHERE key = ?`, key).Scan(&val)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return val, nil
+}
+
+// SetBlockedUntil persists the cooldown expiration time in app_state.
+func (s *Store) SetBlockedUntil(until time.Time) error {
+	return s.SetState("blocked_until", until.UTC().Format(time.RFC3339))
+}
+
+// GetBlockedUntil retrieves the active cooldown expiration time.
+// Returns nil if no cooldown is stored.
+func (s *Store) GetBlockedUntil() (*time.Time, error) {
+	val, err := s.GetState("blocked_until")
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	t, err := time.Parse(time.RFC3339, val)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// ClearBlockedUntil clears any persisted cooldown.
+func (s *Store) ClearBlockedUntil() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM app_state WHERE key = 'blocked_until'`)
 	return err
 }
 

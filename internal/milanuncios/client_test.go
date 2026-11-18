@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
@@ -175,6 +176,7 @@ func TestClientErrors(t *testing.T) {
 			t.Fatalf("expected exit code 5 for rate limit, got %d", ok.Code)
 		}
 		ts429.Close()
+		client.ClearBlock()
 	}
 
 	// Test invalid JSON (Exit 7 - API Changed)
@@ -437,16 +439,21 @@ func TestParseCookies(t *testing.T) {
 	// JSON format (Cookie-Editor)
 	jsonCookies := `[
 		{"name": "other_cookie", "value": "123"},
-		{"name": "token", "value": "jwt-session-token-abc"}
+		{"name": "token", "value": "jwt-session-token-abc"},
+		{"name": "datadome", "value": "datadome-cookie-val-123"},
+		{"name": "cf_clearance", "value": "cf-clearance-val-456"}
 	]`
-	tok, err := milanuncios.ParseCookies(jsonCookies)
+	tok, waf, err := milanuncios.ParseCookies(jsonCookies)
 	if err != nil || tok != "jwt-session-token-abc" {
 		t.Fatalf("expected 'jwt-session-token-abc', got %q (err: %v)", tok, err)
+	}
+	if waf["datadome"] != "datadome-cookie-val-123" || waf["cf_clearance"] != "cf-clearance-val-456" {
+		t.Fatalf("expected WAF cookies datadome & cf_clearance, got %+v", waf)
 	}
 
 	// Single JSON object
 	singleJSON := `{"name": "token", "value": "single-json-token"}`
-	tok, err = milanuncios.ParseCookies(singleJSON)
+	tok, _, err = milanuncios.ParseCookies(singleJSON)
 	if err != nil || tok != "single-json-token" {
 		t.Fatalf("expected 'single-json-token', got %q (err: %v)", tok, err)
 	}
@@ -454,15 +461,19 @@ func TestParseCookies(t *testing.T) {
 	// Netscape format with #HttpOnly_
 	httpOnlyCookies := `# Netscape HTTP Cookie File
 #HttpOnly_.milanuncios.com	TRUE	/	TRUE	1799999999	token	httponly-token-val
+.milanuncios.com	TRUE	/	TRUE	1799999999	datadome	dd-netscape-val
 `
-	tok, err = milanuncios.ParseCookies(httpOnlyCookies)
+	tok, waf, err = milanuncios.ParseCookies(httpOnlyCookies)
 	if err != nil || tok != "httponly-token-val" {
 		t.Fatalf("expected 'httponly-token-val', got %q (err: %v)", tok, err)
+	}
+	if waf["datadome"] != "dd-netscape-val" {
+		t.Fatalf("expected datadome from Netscape, got %+v", waf)
 	}
 
 	// Quoted cookie value
 	quotedCookies := `token="quoted-jwt-token"; other=123`
-	tok, err = milanuncios.ParseCookies(quotedCookies)
+	tok, _, err = milanuncios.ParseCookies(quotedCookies)
 	if err != nil || tok != "quoted-jwt-token" {
 		t.Fatalf("expected 'quoted-jwt-token', got %q (err: %v)", tok, err)
 	}
@@ -471,26 +482,29 @@ func TestParseCookies(t *testing.T) {
 	netscapeCookies := `# Netscape HTTP Cookie File
 .milanuncios.com	TRUE	/	TRUE	1799999999	session	session-token-xyz
 `
-	tok, err = milanuncios.ParseCookies(netscapeCookies)
+	tok, _, err = milanuncios.ParseCookies(netscapeCookies)
 	if err != nil || tok != "session-token-xyz" {
 		t.Fatalf("expected 'session-token-xyz', got %q (err: %v)", tok, err)
 	}
 
-	// Raw Cookie header format
-	headerCookies := "other=abc; adevinta_session=adevinta-secret-999; foo=bar"
-	tok, err = milanuncios.ParseCookies(headerCookies)
+	// Raw Cookie header format with WAF cookies
+	headerCookies := "other=abc; adevinta_session=adevinta-secret-999; datadome=header-dd; cf_clearance=header-cf; foo=bar"
+	tok, waf, err = milanuncios.ParseCookies(headerCookies)
 	if err != nil || tok != "adevinta-secret-999" {
 		t.Fatalf("expected 'adevinta-secret-999', got %q (err: %v)", tok, err)
 	}
+	if waf["datadome"] != "header-dd" || waf["cf_clearance"] != "header-cf" {
+		t.Fatalf("expected datadome & cf_clearance from header, got %+v", waf)
+	}
 
 	// Direct token
-	tok, err = milanuncios.ParseCookies("directtoken123456789")
+	tok, _, err = milanuncios.ParseCookies("directtoken123456789")
 	if err != nil || tok != "directtoken123456789" {
 		t.Fatalf("expected 'directtoken123456789', got %q (err: %v)", tok, err)
 	}
 
 	// Invalid empty
-	_, err = milanuncios.ParseCookies("   ")
+	_, _, err = milanuncios.ParseCookies("   ")
 	if err == nil {
 		t.Fatal("expected error on empty cookies, got nil")
 	}
@@ -833,4 +847,116 @@ func TestStartConversation(t *testing.T) {
 			t.Errorf("unexpected conversation id: %s", res.ConversationID)
 		}
 	})
+}
+
+func TestClientCircuitBreakerAndOnBlock(t *testing.T) {
+	serverRequests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverRequests++
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error": "rate limit exceeded"}`))
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	var blockCalledWith time.Time
+	client.OnBlock = func(until time.Time) {
+		blockCalledWith = until
+	}
+
+	before := time.Now()
+	_, err := client.Search(context.Background(), milanuncios.SearchQuery{Keywords: "test"})
+	if err == nil {
+		t.Fatal("expected error on 429, got nil")
+	}
+
+	var de *output.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *DomainError, got %T: %v", err, err)
+	}
+	if de.Kind != output.KindBlocked {
+		t.Errorf("expected KindBlocked, got %v", de.Kind)
+	}
+	if de.Retryable {
+		t.Errorf("expected Retryable to be false on KindBlocked")
+	}
+
+	if blockCalledWith.IsZero() {
+		t.Fatal("expected OnBlock to be invoked")
+	}
+	expectedMinUntil := before.Add(25 * time.Second)
+	if blockCalledWith.Before(expectedMinUntil) {
+		t.Errorf("expected block cooldown until at least %v, got %v", expectedMinUntil, blockCalledWith)
+	}
+
+	if !client.IsBlocked() {
+		t.Fatal("expected client.IsBlocked() to be true")
+	}
+
+	// Next request while blocked should fail immediately WITHOUT hitting the server
+	_, err2 := client.Search(context.Background(), milanuncios.SearchQuery{Keywords: "test2"})
+	if err2 == nil {
+		t.Fatal("expected error while blocked, got nil")
+	}
+	if !output.IsKind(err2, output.KindBlocked) {
+		t.Errorf("expected KindBlocked for circuit breaker rejection, got %v", err2)
+	}
+	if serverRequests != 1 {
+		t.Errorf("expected server to only receive 1 request, got %d", serverRequests)
+	}
+
+	// Clearing block allows request through
+	client.ClearBlock()
+	if client.IsBlocked() {
+		t.Fatal("expected client.IsBlocked() to be false after ClearBlock")
+	}
+}
+
+func TestClientCookiePersistence(t *testing.T) {
+	var receivedCookie string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedCookie = r.Header.Get("Cookie")
+		http.SetCookie(w, &http.Cookie{
+			Name:  "datadome",
+			Value: "updated-dd-value",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items": [], "total": 0}`))
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("jwt-sess-123")
+	client.SetCookies(map[string]string{
+		"datadome":     "initial-dd-value",
+		"cf_clearance": "initial-cf-value",
+	})
+
+	_, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+
+	if !strings.Contains(receivedCookie, "token=jwt-sess-123") {
+		t.Errorf("expected Cookie header to contain token, got: %s", receivedCookie)
+	}
+	if !strings.Contains(receivedCookie, "datadome=initial-dd-value") {
+		t.Errorf("expected Cookie header to contain datadome, got: %s", receivedCookie)
+	}
+	if !strings.Contains(receivedCookie, "cf_clearance=initial-cf-value") {
+		t.Errorf("expected Cookie header to contain cf_clearance, got: %s", receivedCookie)
+	}
+
+	// Response Set-Cookie should update client's cookies
+	cookies := client.GetCookies()
+	if cookies["datadome"] != "updated-dd-value" {
+		t.Errorf("expected datadome to be updated to 'updated-dd-value', got %q", cookies["datadome"])
+	}
+	if cookies["cf_clearance"] != "initial-cf-value" {
+		t.Errorf("expected cf_clearance to remain 'initial-cf-value', got %q", cookies["cf_clearance"])
+	}
 }

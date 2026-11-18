@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,15 +36,20 @@ type Client struct {
 	BaseURL      string
 	UserAgent    string
 	SessionToken string
+	Cookies      map[string]string
 	HTTP         *http.Client
 	Proxy        string
 	Debug        io.Writer
 	Notice       func(string)
-	OnBlock      func(ctx context.Context)
+	OnBlock      func(until time.Time)
 
 	redactStrings []string
 	uaMu          sync.Mutex
 	useBrowserUA  bool
+
+	cookiesMu    sync.RWMutex
+	blockMu      sync.RWMutex
+	blockedUntil *time.Time
 }
 
 // NewClient creates an initialized Client.
@@ -54,6 +60,7 @@ func NewClient(version string) *Client {
 	return &Client{
 		BaseURL:   "https://www.milanuncios.com",
 		UserAgent: fmt.Sprintf("milanuncios-cli/%s (+https://github.com/gek0v/milanuncios-cli)", version),
+		Cookies:   make(map[string]string),
 		HTTP: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -64,6 +71,137 @@ func NewClient(version string) *Client {
 func (c *Client) SetSession(token string) {
 	c.SessionToken = token
 	c.Redact(token)
+}
+
+// SetCookies configures additional cookies (such as WAF/anti-bot cookies) sent with requests.
+func (c *Client) SetCookies(cookies map[string]string) {
+	c.cookiesMu.Lock()
+	defer c.cookiesMu.Unlock()
+	if c.Cookies == nil {
+		c.Cookies = make(map[string]string)
+	}
+	for k, v := range cookies {
+		c.Cookies[k] = v
+		c.Redact(v)
+	}
+}
+
+// SetCookie adds or updates a single cookie and redacts its value.
+func (c *Client) SetCookie(name, value string) {
+	c.cookiesMu.Lock()
+	defer c.cookiesMu.Unlock()
+	if c.Cookies == nil {
+		c.Cookies = make(map[string]string)
+	}
+	c.Cookies[name] = value
+	c.Redact(value)
+}
+
+// GetCookies returns a snapshot of the configured cookies.
+func (c *Client) GetCookies() map[string]string {
+	c.cookiesMu.RLock()
+	defer c.cookiesMu.RUnlock()
+	copied := make(map[string]string, len(c.Cookies))
+	for k, v := range c.Cookies {
+		copied[k] = v
+	}
+	return copied
+}
+
+func (c *Client) cookieHeader(auth bool) string {
+	var parts []string
+	if c.SessionToken != "" {
+		parts = append(parts, "token="+c.SessionToken)
+	}
+	c.cookiesMu.RLock()
+	for k, v := range c.Cookies {
+		lower := strings.ToLower(k)
+		if c.SessionToken != "" && (lower == "token" || lower == "session") {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	c.cookiesMu.RUnlock()
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
+}
+
+// SetBlockedUntil sets a cooldown expiration time for the client.
+func (c *Client) SetBlockedUntil(until time.Time) {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	c.blockedUntil = &until
+}
+
+// BlockedUntil returns the cooldown expiration time if active, or nil.
+func (c *Client) BlockedUntil() *time.Time {
+	c.blockMu.RLock()
+	defer c.blockMu.RUnlock()
+	if c.blockedUntil == nil {
+		return nil
+	}
+	t := *c.blockedUntil
+	return &t
+}
+
+// IsBlocked returns true if the client is currently in a cooldown period.
+func (c *Client) IsBlocked() bool {
+	c.blockMu.RLock()
+	defer c.blockMu.RUnlock()
+	if c.blockedUntil == nil {
+		return false
+	}
+	return time.Now().Before(*c.blockedUntil)
+}
+
+// ClearBlock clears any active cooldown.
+func (c *Client) ClearBlock() {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	c.blockedUntil = nil
+}
+
+func parseCooldown(resp *http.Response) time.Duration {
+	defaultCooldown := 15 * time.Minute
+	if resp == nil {
+		return defaultCooldown
+	}
+	retryAfter := resp.Header.Get("Retry-After")
+	if retryAfter == "" {
+		return defaultCooldown
+	}
+	if sec, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	if t, err := http.ParseTime(retryAfter); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return d
+		}
+	}
+	return defaultCooldown
+}
+
+func isWAFCookie(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "datadome" ||
+		lower == "cf_clearance" ||
+		lower == "__cf_bm" ||
+		lower == "_cfuvid" ||
+		lower == "bm_sz" ||
+		lower == "_abck" ||
+		lower == "ak_bmsc" ||
+		strings.HasPrefix(lower, "cf_") ||
+		strings.HasPrefix(lower, "_cf") ||
+		strings.HasPrefix(lower, "__cf") ||
+		strings.Contains(lower, "datadome")
+}
+
+func isSessionCookieName(lower string) bool {
+	return lower == "token" || lower == "session" || lower == "adevinta_session" || lower == "jwt" || lower == "session_token"
 }
 
 // Redact registers a string to be replaced with [REDACTED] in debug logs.
@@ -141,6 +279,21 @@ func (c *Client) debugf(format string, args ...any) {
 func (c *Client) doRequest(ctx context.Context, method, path string, query url.Values, body any, auth bool, out any) error {
 	endpoint := method + " " + path
 
+	if c.IsBlocked() {
+		until := c.BlockedUntil()
+		msg := "request paused: milanuncios circuit breaker is active"
+		if until != nil {
+			msg = fmt.Sprintf("request paused: milanuncios circuit breaker is active until %s", until.Local().Format("15:04:05"))
+		}
+		return &output.DomainError{
+			Kind:      output.KindBlocked,
+			Status:    http.StatusTooManyRequests,
+			Endpoint:  endpoint,
+			Retryable: false,
+			Msg:       msg,
+		}
+	}
+
 	if auth && c.SessionToken == "" {
 		return &output.DomainError{
 			Kind:     output.KindAuth,
@@ -179,7 +332,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		}
 		if auth && c.SessionToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.SessionToken)
-			req.Header.Set("Cookie", "token="+c.SessionToken)
+		}
+		if ck := c.cookieHeader(auth); ck != "" {
+			req.Header.Set("Cookie", ck)
 		}
 		if reqID, ok := ctx.Value(clientRequestIDKey).(string); ok && reqID != "" {
 			req.Header.Set("X-Client-Request-Id", reqID)
@@ -199,6 +354,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		return c.wrapNetError(endpoint, err)
 	}
 	defer resp.Body.Close()
+
+	for _, ck := range resp.Cookies() {
+		if isWAFCookie(ck.Name) {
+			c.SetCookie(ck.Name, ck.Value)
+		}
+	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
@@ -223,6 +384,11 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 			return c.wrapNetError(endpoint, err)
 		}
 		defer resp.Body.Close()
+		for _, ck := range resp.Cookies() {
+			if isWAFCookie(ck.Name) {
+				c.SetCookie(ck.Name, ck.Value)
+			}
+		}
 		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		if err != nil {
 			return c.wrapNetError(endpoint, err)
@@ -231,16 +397,19 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 	}
 
 	if isBotStatus(resp.StatusCode, raw) {
+		cooldown := parseCooldown(resp)
+		until := time.Now().Add(cooldown)
+		c.SetBlockedUntil(until)
 		if c.OnBlock != nil {
-			c.OnBlock(ctx)
+			c.OnBlock(until)
 		}
 		return &output.DomainError{
 			Kind:      output.KindBlocked,
 			Status:    resp.StatusCode,
 			Endpoint:  endpoint,
 			Body:      c.snippet(endpoint, raw),
-			Retryable: true,
-			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
+			Retryable: false,
+			Msg:       fmt.Sprintf("milanuncios blocked or rate-limited the request. Wait until %s before retrying", until.Local().Format("15:04:05")),
 		}
 	}
 
@@ -592,13 +761,15 @@ func (c *Client) StartConversation(ctx context.Context, adID, text string, clien
 	return &res, nil
 }
 
-// ParseCookies extracts the session token from browser export formats:
-// JSON (Cookie-Editor, EditThisCookie), Netscape/curl cookies.txt, or raw Cookie header.
-func ParseCookies(raw string) (string, error) {
+// ParseCookies extracts the session token and WAF mitigation cookies (datadome, cf_clearance, etc.)
+// from browser export formats: JSON (Cookie-Editor, EditThisCookie), Netscape/curl cookies.txt, or raw Cookie header.
+func ParseCookies(raw string) (string, map[string]string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return "", output.Usagef("cookies input is empty")
+		return "", nil, output.Usagef("cookies input is empty")
 	}
+
+	wafCookies := make(map[string]string)
 
 	// 1. Try parsing JSON format (Cookie-Editor / EditThisCookie)
 	if strings.HasPrefix(trimmed, "{") {
@@ -607,7 +778,10 @@ func ParseCookies(raw string) (string, error) {
 			Value string `json:"value"`
 		}
 		if err := json.Unmarshal([]byte(trimmed), &single); err == nil && single.Value != "" {
-			return strings.Trim(strings.TrimSpace(single.Value), "\""), nil
+			val := strings.Trim(strings.TrimSpace(single.Value), "\"")
+			if isSessionCookieName(strings.ToLower(single.Name)) || single.Name == "" {
+				return val, wafCookies, nil
+			}
 		}
 	}
 
@@ -617,19 +791,30 @@ func ParseCookies(raw string) (string, error) {
 			Value string `json:"value"`
 		}
 		if err := json.Unmarshal([]byte(trimmed), &cookies); err == nil && len(cookies) > 0 {
+			var token string
 			for _, ck := range cookies {
-				lower := strings.ToLower(ck.Name)
-				if lower == "token" || lower == "session" || lower == "adevinta_session" || lower == "jwt" || lower == "session_token" {
-					if ck.Value != "" {
-						return strings.Trim(strings.TrimSpace(ck.Value), "\""), nil
-					}
+				val := strings.Trim(strings.TrimSpace(ck.Value), "\"")
+				if val == "" {
+					continue
 				}
+				lower := strings.ToLower(ck.Name)
+				if isSessionCookieName(lower) {
+					if token == "" {
+						token = val
+					}
+				} else if isWAFCookie(ck.Name) {
+					wafCookies[ck.Name] = val
+				}
+			}
+			if token != "" {
+				return token, wafCookies, nil
 			}
 		}
 	}
 
 	// 2. Try parsing Netscape cookies.txt lines
 	lines := strings.Split(trimmed, "\n")
+	var tokenFromNetscape string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#HttpOnly_") {
@@ -639,29 +824,54 @@ func ParseCookies(raw string) (string, error) {
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) >= 7 {
-			name := strings.ToLower(parts[5])
-			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
-				return strings.Trim(strings.TrimSpace(parts[6]), "\""), nil
+			name := parts[5]
+			val := strings.Trim(strings.TrimSpace(parts[6]), "\"")
+			if val == "" {
+				continue
+			}
+			lower := strings.ToLower(name)
+			if isSessionCookieName(lower) {
+				if tokenFromNetscape == "" {
+					tokenFromNetscape = val
+				}
+			} else if isWAFCookie(name) {
+				wafCookies[name] = val
 			}
 		}
 	}
+	if tokenFromNetscape != "" {
+		return tokenFromNetscape, wafCookies, nil
+	}
 
 	// 3. Try parsing standard HTTP Cookie: name=val; name2=val2
+	var tokenFromHeader string
 	for _, part := range strings.Split(trimmed, ";") {
 		part = strings.TrimSpace(part)
 		kv := strings.SplitN(part, "=", 2)
 		if len(kv) == 2 {
-			name := strings.ToLower(strings.TrimSpace(kv[0]))
-			if name == "token" || name == "session" || name == "adevinta_session" || name == "jwt" {
-				return strings.Trim(strings.TrimSpace(kv[1]), "\""), nil
+			name := strings.TrimSpace(kv[0])
+			val := strings.Trim(strings.TrimSpace(kv[1]), "\"")
+			if val == "" {
+				continue
+			}
+			lower := strings.ToLower(name)
+			if isSessionCookieName(lower) {
+				if tokenFromHeader == "" {
+					tokenFromHeader = val
+				}
+			} else if isWAFCookie(name) {
+				wafCookies[name] = val
 			}
 		}
+	}
+	if tokenFromHeader != "" {
+		return tokenFromHeader, wafCookies, nil
 	}
 
 	// 4. Fallback: if raw is a pure token string without spaces/semicolons
 	if !strings.ContainsAny(trimmed, " \t\r\n;") && len(trimmed) > 10 {
-		return strings.Trim(trimmed, "\""), nil
+		return strings.Trim(trimmed, "\""), wafCookies, nil
 	}
 
-	return "", output.Usagef("could not find session cookie (token/session/adevinta_session) in provided data")
+	return "", nil, output.Usagef("could not find session cookie (token/session/adevinta_session) in provided data")
 }

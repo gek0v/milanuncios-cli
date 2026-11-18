@@ -5,10 +5,12 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
+	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -161,8 +163,37 @@ func (a *App) setup(cmd *cobra.Command) error {
 	} else {
 		// 2. Load persisted credentials for profile
 		if creds, err := config.LoadCredentials(a.Paths.CredentialsFile); err == nil {
-			if p, ok := creds.Profiles[a.Profile]; ok && p.SessionToken != "" {
-				a.Client.SetSession(p.SessionToken)
+			if p, ok := creds.Profiles[a.Profile]; ok {
+				if p.SessionToken != "" {
+					a.Client.SetSession(p.SessionToken)
+				}
+				if len(p.Cookies) > 0 {
+					a.Client.SetCookies(p.Cookies)
+				}
+			}
+		}
+	}
+
+	// Load cooldown from store if active
+	if a.Paths.StateDB != "" {
+		if st, err := store.Open(a.Paths.StateDB); err == nil {
+			if until, err := st.GetBlockedUntil(); err == nil && until != nil {
+				if time.Now().Before(*until) {
+					a.Client.SetBlockedUntil(*until)
+				} else {
+					_ = st.ClearBlockedUntil()
+				}
+			}
+			_ = st.Close()
+		}
+	}
+
+	// Wire default OnBlock to record cooldown to state store
+	a.Client.OnBlock = func(until time.Time) {
+		if a.Paths.StateDB != "" {
+			if st, err := store.Open(a.Paths.StateDB); err == nil {
+				_ = st.SetBlockedUntil(until)
+				_ = st.Close()
 			}
 		}
 	}
