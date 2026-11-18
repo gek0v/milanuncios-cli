@@ -135,3 +135,63 @@ func TestManagerFromConfig(t *testing.T) {
 		t.Fatalf("expected 0 dispatch errors, got: %v", errs)
 	}
 }
+
+func TestManagerDispatchConcurrent(t *testing.T) {
+	var count int
+	tsOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tsOK.Close()
+
+	tsErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer tsErr.Close()
+
+	cfgSinks := map[string]config.SinkConfig{
+		"hook-1": {
+			Type: "webhook",
+			URL:  tsOK.URL,
+		},
+		"hook-2": {
+			Type: "webhook",
+			URL:  tsOK.URL,
+		},
+		"hook-3": {
+			Type: "webhook",
+			URL:  tsErr.URL,
+		},
+	}
+
+	mgr, err := sink.NewManager(cfgSinks)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	ev := store.Event{
+		ID:        42,
+		EventType: "ad.price_changed",
+		AdID:      "item-42",
+		CreatedAt: time.Now(),
+	}
+
+	start := time.Now()
+	errs := mgr.Dispatch(context.Background(), ev)
+	elapsed := time.Since(start)
+
+	if count > 0 {
+		_ = count
+	}
+
+	// 3 sinks with 50ms each sequentially would take >= 150ms. Concurrently it should take ~50-100ms.
+	if elapsed >= 140*time.Millisecond {
+		t.Errorf("expected concurrent dispatch to finish < 140ms, took %v", elapsed)
+	}
+
+	// hook-3 returned 500, so we expect exactly 1 error
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly 1 error from hook-3, got %d: %v", len(errs), errs)
+	}
+}

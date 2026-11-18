@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
@@ -257,14 +258,34 @@ func (m *Manager) Sinks() []Sink {
 	return m.sinks
 }
 
-// Dispatch sends the event to all configured sinks.
+// Dispatch sends the event to all configured sinks concurrently.
 func (m *Manager) Dispatch(ctx context.Context, ev store.Event) []error {
-	var errs []error
-	for _, s := range m.sinks {
-		if err := s.Send(ctx, ev); err != nil {
-			errs = append(errs, fmt.Errorf("sink %s: %w", s.Name(), err))
-		}
+	if len(m.sinks) == 0 {
+		return nil
 	}
+	if len(m.sinks) == 1 {
+		if err := m.sinks[0].Send(ctx, ev); err != nil {
+			return []error{fmt.Errorf("sink %s: %w", m.sinks[0].Name(), err)}
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+
+	for _, s := range m.sinks {
+		wg.Add(1)
+		go func(s Sink) {
+			defer wg.Done()
+			if err := s.Send(ctx, ev); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("sink %s: %w", s.Name(), err))
+				mu.Unlock()
+			}
+		}(s)
+	}
+	wg.Wait()
 	return errs
 }
 
