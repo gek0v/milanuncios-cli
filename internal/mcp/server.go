@@ -451,7 +451,7 @@ func (s *Server) getToolDefinitions() []toolInfo {
 					},
 					"limit": map[string]any{
 						"type":        "integer",
-						"description": "Maximum number of events to return (default 20)",
+						"description": "Maximum number of events to return (default 20, max 100)",
 					},
 				},
 			},
@@ -881,8 +881,11 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			watchID = int64(v)
 		}
 		limit := 20
-		if v, ok := args["limit"].(float64); ok && v > 0 {
+		if v, ok := args["limit"].(float64); ok {
 			limit = int(v)
+		}
+		if limit <= 0 || limit > 100 {
+			limit = 50
 		}
 
 		events, err := s.Store.ListEvents(watchID, limit)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,12 +212,23 @@ func TestEngineAdDiffing(t *testing.T) {
 }
 
 type mockSinkSender struct {
+	mu         sync.Mutex
 	dispatched []store.Event
 }
 
 func (m *mockSinkSender) Dispatch(ctx context.Context, ev store.Event) []error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.dispatched = append(m.dispatched, ev)
 	return nil
+}
+
+func (m *mockSinkSender) getDispatched() []store.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]store.Event, len(m.dispatched))
+	copy(cp, m.dispatched)
+	return cp
 }
 
 func TestEngineFavoritesWatch(t *testing.T) {
@@ -313,8 +325,8 @@ func TestEngineFavoritesWatch(t *testing.T) {
 	if payload["title"] != "VW Golf TDI" || payload["url"] != "https://milanuncios.com/anuncio/fav-1" {
 		t.Fatalf("missing title or url in payload: %+v", payload)
 	}
-	if len(sink.dispatched) != 1 {
-		t.Fatalf("expected 1 dispatched event to sink, got %d", len(sink.dispatched))
+	if len(sink.getDispatched()) != 1 {
+		t.Fatalf("expected 1 dispatched event to sink, got %d", len(sink.getDispatched()))
 	}
 
 	// 4. Item removed from favorites (fav-2 is removed)
@@ -329,8 +341,8 @@ func TestEngineFavoritesWatch(t *testing.T) {
 	if res3.Events[0].EventType != "ad.removed" || res3.Events[0].AdID != "fav-2" {
 		t.Fatalf("unexpected removed event: %+v", res3.Events[0])
 	}
-	if len(sink.dispatched) != 2 {
-		t.Fatalf("expected 2 total dispatched events to sink, got %d", len(sink.dispatched))
+	if len(sink.getDispatched()) != 2 {
+		t.Fatalf("expected 2 total dispatched events to sink, got %d", len(sink.getDispatched()))
 	}
 
 	// 5. Subsequent run should not trigger ad.removed again
@@ -577,5 +589,156 @@ func TestEngineAutomaticRetentionPruning(t *testing.T) {
 	}
 	if _, ok := seenMap["ad-active"]; !ok {
 		t.Error("expected ad-active to be present in seen items")
+	}
+}
+
+type trackingSinkSender struct {
+	mu         sync.Mutex
+	active     int
+	peakActive int
+	sleepDelay time.Duration
+	blockOnCtx bool
+	dispatched []store.Event
+}
+
+func (t *trackingSinkSender) Dispatch(ctx context.Context, ev store.Event) []error {
+	t.mu.Lock()
+	t.active++
+	if t.active > t.peakActive {
+		t.peakActive = t.active
+	}
+	t.dispatched = append(t.dispatched, ev)
+	t.mu.Unlock()
+
+	defer func() {
+		t.mu.Lock()
+		t.active--
+		t.mu.Unlock()
+	}()
+
+	if t.blockOnCtx {
+		select {
+		case <-ctx.Done():
+			return []error{ctx.Err()}
+		case <-time.After(2 * time.Second):
+			return nil
+		}
+	}
+
+	if t.sleepDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return []error{ctx.Err()}
+		case <-time.After(t.sleepDelay):
+		}
+	}
+
+	return nil
+}
+
+func TestEngineConcurrentSinkDispatchAndTimeout(t *testing.T) {
+	var returnItems []milanuncios.AdItem
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(milanuncios.SearchResult{
+			Items: returnItems,
+			Total: len(returnItems),
+		})
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "test_concurrent.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	eng := watch.NewEngine(st, client)
+	tracker := &trackingSinkSender{sleepDelay: 50 * time.Millisecond}
+	eng.Sinks = tracker
+
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "test-concurrent",
+		Target: "test",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// 1. Initial run: seed 1 item so watch is no longer first run
+	returnItems = []milanuncios.AdItem{
+		{ID: "seed-1", Title: "Initial Item", Price: 100},
+	}
+	if _, err := eng.CheckWatch(context.Background(), w); err != nil {
+		t.Fatalf("initial run failed: %v", err)
+	}
+
+	// 2. Add 6 new items (which will trigger 6 ad.new events)
+	returnItems = []milanuncios.AdItem{
+		{ID: "seed-1", Title: "Initial Item", Price: 100},
+		{ID: "ad-1", Title: "Item 1", Price: 10},
+		{ID: "ad-2", Title: "Item 2", Price: 20},
+		{ID: "ad-3", Title: "Item 3", Price: 30},
+		{ID: "ad-4", Title: "Item 4", Price: 40},
+		{ID: "ad-5", Title: "Item 5", Price: 50},
+		{ID: "ad-6", Title: "Item 6", Price: 60},
+	}
+
+	res, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("check watch: %v", err)
+	}
+	if len(res.Events) != 6 {
+		t.Fatalf("expected 6 events, got %d", len(res.Events))
+	}
+
+	tracker.mu.Lock()
+	peak := tracker.peakActive
+	dispatchedCount := len(tracker.dispatched)
+	tracker.mu.Unlock()
+
+	if dispatchedCount != 6 {
+		t.Fatalf("expected 6 dispatched events, got %d", dispatchedCount)
+	}
+	if peak <= 1 {
+		t.Fatalf("expected peak concurrency > 1 for 6 events, got %d", peak)
+	}
+
+	// Verify events were marked as delivered
+	events, err := st.ListEvents(w.ID, 100)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, ev := range events {
+		if !ev.Delivered {
+			t.Errorf("expected event %d to be marked delivered", ev.ID)
+		}
+	}
+
+	// 3. Test timeout: when sinks block, DispatchTimeout aborts within bounded time
+	eng.DispatchTimeout = 60 * time.Millisecond
+	blockingTracker := &trackingSinkSender{blockOnCtx: true}
+	eng.Sinks = blockingTracker
+
+	// Add another new item
+	returnItems = append(returnItems, milanuncios.AdItem{ID: "ad-7", Title: "Item 7", Price: 70})
+
+	start := time.Now()
+	resTimeout, err := eng.CheckWatch(context.Background(), w)
+	duration := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("check watch with timeout failed: %v", err)
+	}
+	if len(resTimeout.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(resTimeout.Events))
+	}
+	if duration >= 1500*time.Millisecond {
+		t.Fatalf("expected dispatch to timeout quickly (~60ms), but took %v", duration)
 	}
 }

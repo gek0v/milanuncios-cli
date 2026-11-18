@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/output"
@@ -86,6 +89,17 @@ func (a *App) sinkTestCmd() *cobra.Command {
 			}
 
 			if err := s.Send(cmd.Context(), mockEvent); err != nil {
+				var de *output.DomainError
+				if errors.As(err, &de) {
+					return err
+				}
+				if isNetworkError(err) {
+					return &output.DomainError{
+						Kind:      output.KindNetwork,
+						Retryable: true,
+						Msg:       fmt.Sprintf("sink test failed: %v", err),
+					}
+				}
 				return fmt.Errorf("sink test failed: %w", err)
 			}
 
@@ -97,4 +111,23 @@ func (a *App) sinkTestCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var de *output.DomainError
+	if errors.As(err, &de) && de.Kind == output.KindNetwork {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	return false
 }

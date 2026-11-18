@@ -899,13 +899,26 @@ func TestSinkCommands(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	tsFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer tsFail.Close()
+
 	tmpDir := t.TempDir()
 	cfgFile := filepath.Join(tmpDir, "config.toml")
 	cfgContent := fmt.Sprintf(`
 [sinks.alerts-hook]
 type = "webhook"
 url = "%s"
-`, ts.URL)
+
+[sinks.dead-hook]
+type = "webhook"
+url = "http://127.0.0.1:59999/dead"
+
+[sinks.fail-hook]
+type = "webhook"
+url = "%s"
+`, ts.URL, tsFail.URL)
 	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
@@ -932,8 +945,8 @@ url = "%s"
 		if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
 			t.Fatalf("failed to decode sink list: %v", err)
 		}
-		if len(list) != 1 || list[0]["name"] != "alerts-hook" {
-			t.Fatalf("unexpected sink list: %+v", list)
+		if len(list) != 3 {
+			t.Fatalf("expected 3 sinks, got %d", len(list))
 		}
 	}
 
@@ -954,6 +967,41 @@ url = "%s"
 		}
 		if !receivedWebhook {
 			t.Fatal("expected webhook to receive mock event")
+		}
+	}
+
+	// 3. sink test network failure (dead-hook) -> Exit Code 6
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		os.Args = []string{"milanuncios", "sink", "test", "dead-hook", "--error-format", "json"}
+		code := app.Execute()
+		if code != 6 {
+			t.Fatalf("expected exit code 6 for sink network failure, got %d (stderr: %s)", code, stderr.String())
+		}
+		var env map[string]any
+		if err := json.Unmarshal(stderr.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshaling error envelope: %v", err)
+		}
+		if env["code"] != float64(6) || env["category"] != "network" {
+			t.Fatalf("expected code 6 and category network, got %+v", env)
+		}
+	}
+
+	// 4. sink test server 500 error (fail-hook) -> Exit Code 1
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		os.Args = []string{"milanuncios", "sink", "test", "fail-hook", "--error-format", "json"}
+		code := app.Execute()
+		if code != 1 {
+			t.Fatalf("expected exit code 1 for sink server error, got %d (stderr: %s)", code, stderr.String())
 		}
 	}
 }

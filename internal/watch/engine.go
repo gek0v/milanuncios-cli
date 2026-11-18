@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
@@ -19,11 +20,12 @@ type SinkSender interface {
 
 // Engine orchestrates periodic checks, diffing, and event generation for watches.
 type Engine struct {
-	Store        *store.Store
-	Client       *milanuncios.Client
-	Sinks        SinkSender
-	Notice       func(string)
-	SeenItemsTTL time.Duration
+	Store           *store.Store
+	Client          *milanuncios.Client
+	Sinks           SinkSender
+	Notice          func(string)
+	SeenItemsTTL    time.Duration
+	DispatchTimeout time.Duration
 }
 
 // NewEngine creates an initialized watch Engine.
@@ -86,15 +88,49 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 		return nil, output.Usagef("unknown watch type %q", w.Type)
 	}
 
-	// Dispatch to external sinks and mark delivered
+	// Dispatch to external sinks concurrently with bounded workers and batch timeout
 	if e.Sinks != nil && len(res.Events) > 0 {
-		var deliveredIDs []int64
-		for _, ev := range res.Events {
-			errs := e.Sinks.Dispatch(ctx, ev)
-			if len(errs) == 0 {
-				deliveredIDs = append(deliveredIDs, ev.ID)
-			}
+		timeout := e.DispatchTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
 		}
+		batchCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		var deliveredMu sync.Mutex
+		var deliveredIDs []int64
+
+		maxWorkers := 5
+		if len(res.Events) < maxWorkers {
+			maxWorkers = len(res.Events)
+		}
+		sem := make(chan struct{}, maxWorkers)
+		var wg sync.WaitGroup
+
+	dispatchLoop:
+		for _, ev := range res.Events {
+			select {
+			case sem <- struct{}{}:
+			case <-batchCtx.Done():
+				break dispatchLoop
+			}
+
+			wg.Add(1)
+			go func(ev store.Event) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				errs := e.Sinks.Dispatch(batchCtx, ev)
+				if len(errs) == 0 {
+					deliveredMu.Lock()
+					deliveredIDs = append(deliveredIDs, ev.ID)
+					deliveredMu.Unlock()
+				}
+			}(ev)
+		}
+		wg.Wait()
+
 		if len(deliveredIDs) > 0 {
 			_ = e.Store.MarkEventsDelivered(deliveredIDs)
 		}

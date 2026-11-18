@@ -371,3 +371,81 @@ func TestMCPSkill(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPWatchEventsLimitCapping(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "state_events.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer st.Close()
+
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "test-watch",
+		Target: "test",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// Insert 10 events
+	for i := 1; i <= 10; i++ {
+		ev := store.Event{
+			WatchID:     w.ID,
+			EventType:   "ad.new",
+			AdID:        strings.Repeat("1", i),
+			PayloadJSON: `{"test": true}`,
+		}
+		if err := st.RecordEvent(&ev); err != nil {
+			t.Fatalf("record event: %v", err)
+		}
+	}
+
+	client := milanuncios.NewClient("test")
+	eng := watch.NewEngine(st, client)
+
+	runMCPRequest := func(args map[string]any) []store.Event {
+		argsJSON, _ := json.Marshal(args)
+		req := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"milanuncios_watch_events","arguments":` + string(argsJSON) + `}}` + "\n"
+		var in, out, errOut bytes.Buffer
+		in.WriteString(req)
+
+		srv := mcp.NewServer("0.1.0-test", client, st, eng, &in, &out, &errOut)
+		if err := srv.Run(context.Background()); err != nil {
+			t.Fatalf("srv.Run: %v", err)
+		}
+
+		var resp map[string]any
+		if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal resp: %v (raw: %s)", err, out.String())
+		}
+		result := resp["result"].(map[string]any)
+		content := result["content"].([]any)
+		text := content[0].(map[string]any)["text"].(string)
+
+		var evs []store.Event
+		if err := json.Unmarshal([]byte(text), &evs); err != nil {
+			t.Fatalf("unmarshal events from tool output: %v (raw: %s)", err, text)
+		}
+		return evs
+	}
+
+	// 1. Explicit valid limit = 3
+	evs3 := runMCPRequest(map[string]any{"watch_id": w.ID, "limit": 3})
+	if len(evs3) != 3 {
+		t.Fatalf("expected 3 events for limit=3, got %d", len(evs3))
+	}
+
+	// 2. Huge unbounded limit = 1000000 -> capped to 50 (all 10 events returned, doesn't error)
+	evsHuge := runMCPRequest(map[string]any{"watch_id": w.ID, "limit": 1000000})
+	if len(evsHuge) != 10 {
+		t.Fatalf("expected all 10 events when capped to 50, got %d", len(evsHuge))
+	}
+
+	// 3. Zero / negative limit -> capped to 50
+	evsZero := runMCPRequest(map[string]any{"watch_id": w.ID, "limit": 0})
+	if len(evsZero) != 10 {
+		t.Fatalf("expected 10 events when limit=0 capped to 50, got %d", len(evsZero))
+	}
+}
