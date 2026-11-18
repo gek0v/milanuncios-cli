@@ -1,6 +1,7 @@
 package milanuncios
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -392,5 +393,64 @@ func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
 		} else {
 			fmt.Fprintf(w, "[%s] %s: %s\n", m.SentAt, sender, m.Text)
 		}
+	}
+}
+
+// ConversationStartResult represents the response when initiating contact on an ad.
+type ConversationStartResult struct {
+	ConversationID string `json:"conversation_id"`
+	AdID           string `json:"ad_id"`
+	AdTitle        string `json:"ad_title,omitempty"`
+	RecipientName  string `json:"recipient_name,omitempty"`
+	MessageID      string `json:"message_id"`
+	Text           string `json:"text"`
+	SentAt         string `json:"sent_at"`
+}
+
+func (r *ConversationStartResult) UnmarshalJSON(data []byte) error {
+	type Alias ConversationStartResult
+	var aux struct {
+		Alias
+		SellerName string `json:"seller_name,omitempty"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = ConversationStartResult(aux.Alias)
+	if r.RecipientName == "" && aux.SellerName != "" {
+		r.RecipientName = aux.SellerName
+	}
+	return nil
+}
+
+// Pretty renders the started conversation in a clean terminal format.
+func (r *ConversationStartResult) Pretty(w io.Writer, color bool) {
+	if r == nil {
+		return
+	}
+	if color {
+		fmt.Fprintf(w, "\x1b[1mConversación iniciada (#%s)\x1b[0m\n", r.ConversationID)
+	} else {
+		fmt.Fprintf(w, "Conversación iniciada (#%s)\n", r.ConversationID)
+	}
+	if r.AdTitle != "" {
+		fmt.Fprintf(w, "Anuncio: %s (ID: %s)\n", r.AdTitle, r.AdID)
+	} else {
+		fmt.Fprintf(w, "Anuncio ID: %s\n", r.AdID)
+	}
+	if r.RecipientName != "" {
+		fmt.Fprintf(w, "Destinatario: %s\n", r.RecipientName)
+	}
+	if r.MessageID != "" {
+		fmt.Fprintf(w, "ID Mensaje: %s\n", r.MessageID)
+	}
+	if r.SentAt != "" {
+		fmt.Fprintf(w, "Enviado: %s\n", r.SentAt)
+	}
+	fmt.Fprintln(w)
+	if color {
+		fmt.Fprintf(w, "\x1b[34m[Tú]:\x1b[0m %s\n", r.Text)
+	} else {
+		fmt.Fprintf(w, "[Tú]: %s\n", r.Text)
 	}
 }

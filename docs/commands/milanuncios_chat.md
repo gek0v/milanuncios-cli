@@ -25,4 +25,5 @@ View and send messages on Milanuncios
 * [milanuncios chat list](milanuncios_chat_list.md)	 - List active chat conversations
 * [milanuncios chat send](milanuncios_chat_send.md)	 - Send a text message in a conversation
 * [milanuncios chat show](milanuncios_chat_show.md)	 - View full message history for a conversation
+* [milanuncios chat start](milanuncios_chat_start.md)	 - Start a conversation with the seller of an ad
 

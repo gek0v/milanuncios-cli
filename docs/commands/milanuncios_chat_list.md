@@ -9,7 +9,8 @@ milanuncios chat list [flags]
 ### Options
 
 ```
-  -h, --help   help for list
+  -h, --help          help for list
+      --unread-only   Filter conversations to only include unread threads
 ```
 
 ### Options inherited from parent commands

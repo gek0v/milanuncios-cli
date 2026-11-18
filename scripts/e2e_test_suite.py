@@ -394,7 +394,7 @@ class TestNotificationSinks(MilanunciosCLITestCase):
 
 
 # ==============================================================================
-# 7. CHAT & MESSAGING VALIDATION (Tests 46 - 48)
+# 7. CHAT & MESSAGING VALIDATION (Tests 46 - 48+)
 # ==============================================================================
 class TestChatValidation(MilanunciosCLITestCase):
 
@@ -411,6 +411,19 @@ class TestChatValidation(MilanunciosCLITestCase):
         res = self.run_cli("chat", "send")
         self.assertEqual(res.returncode, 2)
         self.assertIn("requires at least 2 arg", res.stderr.lower())
+
+    def test_48b_chat_start_missing_arguments_exit_code_2(self):
+        res = self.run_cli("chat", "start")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("requires at least 1 arg", res.stderr.lower())
+
+    def test_48c_chat_start_unauthenticated_exit_code_3(self):
+        res = self.run_cli("chat", "start", "492817294", "Hola, sigue disponible?")
+        self.assertEqual(res.returncode, 3)
+
+    def test_48d_chat_list_unread_only_unauthenticated_exit_code_3(self):
+        res = self.run_cli("chat", "list", "--unread-only")
+        self.assertEqual(res.returncode, 3)
 
 
 # ==============================================================================

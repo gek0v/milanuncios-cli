@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -621,4 +622,215 @@ func TestSendMessagePayloadInBody(t *testing.T) {
 	if receivedBody["text"] != "¿Sigue disponible?" {
 		t.Fatalf("expected body text '¿Sigue disponible?', got %q", receivedBody["text"])
 	}
+}
+
+func TestStartConversation(t *testing.T) {
+	t.Run("happy path with mock server", func(t *testing.T) {
+		var (
+			receivedMethod      string
+			receivedPath        string
+			receivedContentType string
+			receivedBody        map[string]string
+		)
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedMethod = r.Method
+			receivedPath = r.URL.Path
+			receivedContentType = r.Header.Get("Content-Type")
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+
+			resp := milanuncios.ConversationStartResult{
+				ConversationID: "conv-8849201",
+				AdID:           "492817294",
+				AdTitle:        "Volkswagen Golf VII 2.0 TDI",
+				RecipientName:  "Javier R.",
+				MessageID:      "msg-9901",
+				Text:           "Hola, me interesa el coche.",
+				SentAt:         "2026-11-18T09:20:00Z",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer ts.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = ts.URL
+		client.SetSession("valid-session")
+
+		res, err := client.StartConversation(context.Background(), "492817294", "Hola, me interesa el coche.")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if receivedMethod != http.MethodPost {
+			t.Errorf("expected POST, got %s", receivedMethod)
+		}
+		if receivedPath != "/api/v1/ads/492817294/contact" {
+			t.Errorf("expected /api/v1/ads/492817294/contact, got %s", receivedPath)
+		}
+		if !strings.HasPrefix(receivedContentType, "application/json") {
+			t.Errorf("expected Content-Type application/json, got %s", receivedContentType)
+		}
+		if receivedBody["ad_id"] != "492817294" || receivedBody["text"] != "Hola, me interesa el coche." {
+			t.Errorf("unexpected body payload: %+v", receivedBody)
+		}
+
+		if res.ConversationID != "conv-8849201" {
+			t.Errorf("expected conv-8849201, got %s", res.ConversationID)
+		}
+		if res.RecipientName != "Javier R." {
+			t.Errorf("expected Javier R., got %s", res.RecipientName)
+		}
+
+		var buf bytes.Buffer
+		res.Pretty(&buf, false)
+		prettyOut := buf.String()
+		if !strings.Contains(prettyOut, "conv-8849201") || !strings.Contains(prettyOut, "Volkswagen Golf") {
+			t.Errorf("pretty output missing expected fields: %s", prettyOut)
+		}
+
+		buf.Reset()
+		res.Pretty(&buf, true)
+		if !strings.Contains(buf.String(), "conv-8849201") {
+			t.Errorf("pretty color output missing conversation ID: %s", buf.String())
+		}
+	})
+
+	t.Run("404 not found", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error": "not found"}`))
+		}))
+		defer ts.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = ts.URL
+		client.SetSession("valid-session")
+
+		_, err := client.StartConversation(context.Background(), "492817294", "Hola")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		var de *output.DomainError
+		if !errors.As(err, &de) {
+			t.Fatalf("expected DomainError, got %T: %v", err, err)
+		}
+		if de.Kind != output.KindNotFound {
+			t.Errorf("expected KindNotFound, got %v", de.Kind)
+		}
+		if !strings.Contains(err.Error(), "ad not found: 492817294") {
+			t.Errorf("expected error message to contain 'ad not found: 492817294', got %q", err.Error())
+		}
+	})
+
+	t.Run("own ad validation error 400", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message": "cannot start conversation on your own ad"}`))
+		}))
+		defer ts.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = ts.URL
+		client.SetSession("valid-session")
+
+		_, err := client.StartConversation(context.Background(), "492817294", "Hola")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		var ue *output.UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("expected UsageError, got %T: %v", err, err)
+		}
+		if ue.Msg != "cannot start conversation on your own ad" {
+			t.Errorf("unexpected error message: %q", ue.Msg)
+		}
+	})
+
+	t.Run("own ad validation error 422", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"error": "own_ad"}`))
+		}))
+		defer ts.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = ts.URL
+		client.SetSession("valid-session")
+
+		_, err := client.StartConversation(context.Background(), "492817294", "Hola")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		var ue *output.UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("expected UsageError, got %T: %v", err, err)
+		}
+		if ue.Msg != "cannot start conversation on your own ad" {
+			t.Errorf("unexpected error message: %q", ue.Msg)
+		}
+	})
+
+	t.Run("empty text validation", func(t *testing.T) {
+		client := milanuncios.NewClient("test")
+		client.SetSession("valid-session")
+
+		_, err := client.StartConversation(context.Background(), "492817294", "   \t\n ")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		var ue *output.UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("expected UsageError, got %T: %v", err, err)
+		}
+		if ue.Msg != "message text cannot be empty" {
+			t.Errorf("unexpected error message: %q", ue.Msg)
+		}
+	})
+
+	t.Run("client_request_id header and body payload", func(t *testing.T) {
+		var (
+			receivedHeaderID string
+			receivedBody     map[string]string
+		)
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedHeaderID = r.Header.Get("X-Client-Request-Id")
+			_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+
+			resp := milanuncios.ConversationStartResult{
+				ConversationID: "conv-12345",
+				AdID:           "492817294",
+				MessageID:      "msg-1",
+				Text:           receivedBody["text"],
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}))
+		defer ts.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = ts.URL
+		client.SetSession("valid-session")
+
+		reqID := "550e8400-e29b-41d4-a716-446655440001"
+		res, err := client.StartConversation(context.Background(), "https://www.milanuncios.com/anuncios/492817294.htm", "Oferta inicial", reqID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if receivedHeaderID != reqID {
+			t.Errorf("expected X-Client-Request-Id %q, got %q", reqID, receivedHeaderID)
+		}
+		if receivedBody["client_request_id"] != reqID {
+			t.Errorf("expected client_request_id in body %q, got %q", reqID, receivedBody["client_request_id"])
+		}
+		if res.ConversationID != "conv-12345" {
+			t.Errorf("unexpected conversation id: %s", res.ConversationID)
+		}
+	})
 }

@@ -21,6 +21,15 @@ import (
 
 const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+type contextKey string
+
+const clientRequestIDKey contextKey = "client_request_id"
+
+// WithClientRequestID attaches a client_request_id to the context for outgoing requests.
+func WithClientRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientRequestIDKey, id)
+}
+
 // Client interacts with the Milanuncios web endpoints and private API.
 type Client struct {
 	BaseURL      string
@@ -171,6 +180,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		if auth && c.SessionToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.SessionToken)
 			req.Header.Set("Cookie", "token="+c.SessionToken)
+		}
+		if reqID, ok := ctx.Value(clientRequestIDKey).(string); ok && reqID != "" {
+			req.Header.Set("X-Client-Request-Id", reqID)
 		}
 		return req, nil
 	}
@@ -526,6 +538,58 @@ func (c *Client) SendMessage(ctx context.Context, convID, text string) (*Message
 		return nil, err
 	}
 	return &msg, nil
+}
+
+// StartConversation initiates a new contact message for an ad listing.
+func (c *Client) StartConversation(ctx context.Context, adID, text string, clientRequestID ...string) (*ConversationStartResult, error) {
+	id, err := ExtractAdID(adID)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmedText := strings.TrimSpace(text)
+	if trimmedText == "" {
+		return nil, output.Usagef("message text cannot be empty")
+	}
+
+	payload := map[string]string{
+		"ad_id": id,
+		"text":  trimmedText,
+	}
+
+	if len(clientRequestID) > 0 && strings.TrimSpace(clientRequestID[0]) != "" {
+		reqID := strings.TrimSpace(clientRequestID[0])
+		payload["client_request_id"] = reqID
+		ctx = WithClientRequestID(ctx, reqID)
+	}
+
+	var res ConversationStartResult
+	endpoint := fmt.Sprintf("/api/v1/ads/%s/contact", id)
+	if err := c.doRequest(ctx, http.MethodPost, endpoint, nil, payload, true, &res); err != nil {
+		var de *output.DomainError
+		if errors.As(err, &de) {
+			if de.Status == http.StatusNotFound || de.Kind == output.KindNotFound {
+				return nil, output.NotFoundf("ad not found: %s", id)
+			}
+			if de.Status == http.StatusBadRequest || de.Status == http.StatusUnprocessableEntity {
+				lower := strings.ToLower(de.Body + " " + de.Msg)
+				if strings.Contains(lower, "own") || strings.Contains(lower, "propio") ||
+					strings.Contains(lower, "same user") || strings.Contains(lower, "same_user") {
+					return nil, output.Usagef("cannot start conversation on your own ad")
+				}
+			}
+		}
+		return nil, err
+	}
+
+	if res.AdID == "" {
+		res.AdID = id
+	}
+	if res.Text == "" {
+		res.Text = trimmedText
+	}
+
+	return &res, nil
 }
 
 // ParseCookies extracts the session token from browser export formats:
