@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,7 @@ func TestNtfySink(t *testing.T) {
 }
 
 func TestWebhookSink(t *testing.T) {
+	t.Setenv("MILANUNCIOS_ALLOW_PRIVATE_IPS", "true")
 	var receivedAuth string
 	var receivedEvent store.Event
 
@@ -97,6 +99,7 @@ func TestWebhookSink(t *testing.T) {
 }
 
 func TestManagerFromConfig(t *testing.T) {
+	t.Setenv("MILANUNCIOS_ALLOW_PRIVATE_IPS", "true")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -133,5 +136,46 @@ func TestManagerFromConfig(t *testing.T) {
 	errs := mgr.Dispatch(context.Background(), ev)
 	if len(errs) != 0 {
 		t.Fatalf("expected 0 dispatch errors, got: %v", errs)
+	}
+}
+
+func TestWebhookSink_SSRFProtection(t *testing.T) {
+	// Ensure MILANUNCIOS_ALLOW_PRIVATE_IPS is unset
+	t.Setenv("MILANUNCIOS_ALLOW_PRIVATE_IPS", "")
+
+	blockedURLs := []struct {
+		name string
+		url  string
+	}{
+		{"IPv4 Loopback", "http://127.0.0.1:8080/webhook"},
+		{"Localhost hostname", "http://localhost:8080/webhook"},
+		{"AWS Instance Metadata", "http://169.254.169.254/latest/meta-data/"},
+		{"Cloud Link-Local Subnet", "http://169.254.10.20/endpoint"},
+		{"RFC1918 Class A Subnet", "http://10.0.0.1:8080/alert"},
+		{"RFC1918 Class B Subnet", "http://172.16.0.5:9000/alert"},
+		{"RFC1918 Class C Subnet", "http://192.168.1.100/webhook"},
+		{"IPv6 Loopback", "http://[::1]:8080/webhook"},
+		{"Unsupported Scheme", "ftp://example.com/webhook"},
+	}
+
+	for _, tc := range blockedURLs {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sink.NewWebhookSink("test-blocked", tc.url, "")
+			if err == nil {
+				t.Fatalf("expected NewWebhookSink to reject %s (%s)", tc.name, tc.url)
+			}
+			if !strings.Contains(err.Error(), "anti-SSRF policy") && !strings.Contains(err.Error(), "unsupported scheme") {
+				t.Errorf("expected SSRF or scheme rejection error, got: %v", err)
+			}
+		})
+	}
+
+	// Valid public webhook URL should succeed
+	s, err := sink.NewWebhookSink("test-public", "https://example.com/webhook", "")
+	if err != nil {
+		t.Fatalf("expected valid public webhook URL to succeed, got: %v", err)
+	}
+	if s == nil {
+		t.Fatalf("expected non-nil WebhookSink")
 	}
 }

@@ -32,14 +32,15 @@ func WithClientRequestID(ctx context.Context, id string) context.Context {
 
 // Client interacts with the Milanuncios web endpoints and private API.
 type Client struct {
-	BaseURL      string
-	UserAgent    string
-	SessionToken string
-	HTTP         *http.Client
-	Proxy        string
-	Debug        io.Writer
-	Notice       func(string)
-	OnBlock      func(ctx context.Context)
+	BaseURL         string
+	UserAgent       string
+	SessionToken    string
+	HTTP            *http.Client
+	Proxy           string
+	Debug           io.Writer
+	Notice          func(string)
+	OnBlock         func(ctx context.Context)
+	AllowPrivateIPs bool
 
 	redactStrings []string
 	uaMu          sync.Mutex

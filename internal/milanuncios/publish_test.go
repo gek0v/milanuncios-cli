@@ -508,6 +508,7 @@ func TestUploadPhoto_LocalFile(t *testing.T) {
 	client := milanuncios.NewClient("test")
 	client.BaseURL = ts.URL
 	client.SetSession("fake-token")
+	client.AllowPrivateIPs = true
 
 	tmpDir := t.TempDir()
 	localFile := filepath.Join(tmpDir, "sample.jpg")
@@ -551,6 +552,7 @@ func TestUploadPhoto_RemoteURL(t *testing.T) {
 	client := milanuncios.NewClient("test")
 	client.BaseURL = ts.URL
 	client.SetSession("fake-token")
+	client.AllowPrivateIPs = true
 
 	remoteURL := imgServer.URL + "/car.png"
 	photo, err := client.UploadPhoto(context.Background(), remoteURL, 1)
@@ -573,6 +575,7 @@ func TestUploadPhoto_Base64DataURI(t *testing.T) {
 	client := milanuncios.NewClient("test")
 	client.BaseURL = ts.URL
 	client.SetSession("fake-token")
+	client.AllowPrivateIPs = true
 
 	// Base64 for JPEG bytes /9j/4AAQSkZJRg==
 	dataURI := "data:image/jpeg;base64,/9j/4AAQSkZJRg=="

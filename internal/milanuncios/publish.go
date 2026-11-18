@@ -506,12 +506,18 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 
 	// 2. Remote HTTP/HTTPS URL
 	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		allowPrivate := c.AllowPrivateIPs || os.Getenv("MILANUNCIOS_ALLOW_PRIVATE_IPS") == "true"
+		if err := ValidateRemotePhotoURL(ctx, trimmed, allowPrivate); err != nil {
+			return nil, output.Usagef("remote photo URL blocked by anti-SSRF policy: %v", err)
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
 		if err != nil {
 			return nil, fmt.Errorf("creating request for remote photo %q: %w", trimmed, err)
 		}
 		req.Header.Set("User-Agent", c.currentUA())
-		resp, err := c.HTTP.Do(req)
+		photoHTTPClient := newSafePhotoHTTPClient(allowPrivate)
+		resp, err := photoHTTPClient.Do(req)
 		if err != nil {
 			return nil, c.wrapNetError("GET "+trimmed, err)
 		}
@@ -529,11 +535,7 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 			return nil, output.Usagef("remote photo %q exceeds 15 MB limit", trimmed)
 		}
 
-		ct := resp.Header.Get("Content-Type")
-		mimeType = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
-		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
-			mimeType = detectImageMime(data, trimmed)
-		}
+		mimeType = detectImageMime(data, trimmed)
 		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
 			return nil, output.Usagef("unsupported remote image format %q (detected: %s)", trimmed, mimeType)
 		}
@@ -576,12 +578,11 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 			return nil, output.Usagef("base64 photo exceeds 15 MB limit")
 		}
 
-		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
-			mimeType = detectImageMime(data, "")
+		detectedMime := detectImageMime(data, "")
+		if detectedMime != "image/jpeg" && detectedMime != "image/png" && detectedMime != "image/webp" {
+			return nil, output.Usagef("unsupported data URI image format %q: payload does not contain valid image magic bytes", mimeType)
 		}
-		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
-			return nil, output.Usagef("unsupported data URI image format %q", mimeType)
-		}
+		mimeType = detectedMime
 		ext := mimeToExt(mimeType)
 		filename = fmt.Sprintf("photo_%d%s", index, ext)
 
@@ -928,23 +929,13 @@ func detectImageMime(data []byte, filename string) string {
 	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
 		return "image/jpeg"
 	}
-	if len(data) >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G' {
+	if len(data) >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G' &&
+		data[4] == '\r' && data[5] == '\n' && data[6] == 0x1A && data[7] == '\n' {
 		return "image/png"
 	}
 	detected := http.DetectContentType(data)
 	if detected == "image/jpeg" || detected == "image/png" || detected == "image/webp" {
 		return detected
-	}
-	if filename != "" {
-		ext := strings.ToLower(filepath.Ext(filename))
-		switch ext {
-		case ".jpg", ".jpeg":
-			return "image/jpeg"
-		case ".png":
-			return "image/png"
-		case ".webp":
-			return "image/webp"
-		}
 	}
 	return detected
 }

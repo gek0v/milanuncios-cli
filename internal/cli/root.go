@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
@@ -114,6 +116,21 @@ func (a *App) favoriteCmd() *cobra.Command {
 	return cmd
 }
 
+var proxyCredentialPattern = regexp.MustCompile(`([a-zA-Z0-9+.-]+://)?([^@/\s:"]*):([^@/\s"]+)@`)
+
+func redactProxyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		sanitizedURL := proxyCredentialPattern.ReplaceAllString(urlErr.URL, "${1}${2}:xxxxx@")
+		return fmt.Errorf("%s %q: %w", urlErr.Op, sanitizedURL, urlErr.Err)
+	}
+	sanitizedMsg := proxyCredentialPattern.ReplaceAllString(err.Error(), "${1}${2}:xxxxx@")
+	return errors.New(sanitizedMsg)
+}
+
 func (a *App) setup(cmd *cobra.Command) error {
 	if cmd.Name() == "help" || cmd.Name() == "completion" || (cmd.Parent() != nil && cmd.Parent().Name() == "completion") {
 		return nil
@@ -178,7 +195,7 @@ func (a *App) setup(cmd *cobra.Command) error {
 	if proxyStr != "" {
 		u, err := url.Parse(proxyStr)
 		if err != nil {
-			return output.Usagef("invalid proxy configuration: %v", err)
+			return output.Usagef("invalid proxy configuration: %v", redactProxyError(err))
 		}
 		a.Client.UseProxy(u)
 	}

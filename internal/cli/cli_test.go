@@ -841,6 +841,7 @@ url = "%s"
 	}
 
 	t.Setenv("MILANUNCIOS_CONFIG", cfgFile)
+	t.Setenv("MILANUNCIOS_ALLOW_PRIVATE_IPS", "true")
 
 	// 1. sink list
 	{

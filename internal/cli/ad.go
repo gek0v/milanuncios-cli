@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -259,16 +260,40 @@ func (a *App) adUnfavoriteCmd() *cobra.Command {
 	}
 }
 
-func openBrowser(rawURL string) error {
-	var cmd *exec.Cmd
+func validateAdURL(rawURL string) (string, error) {
+	if strings.ContainsAny(rawURL, " \t\r\n\"'<>^|`") {
+		return "", fmt.Errorf("ad URL contains invalid or dangerous characters")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid ad URL: %w", err)
+	}
+	if strings.ToLower(u.Scheme) != "https" {
+		return "", fmt.Errorf("insecure ad URL scheme %q: only https is allowed", u.Scheme)
+	}
+	if !strings.EqualFold(u.Host, "www.milanuncios.com") {
+		return "", fmt.Errorf("invalid ad URL host %q: only www.milanuncios.com is allowed", u.Host)
+	}
+	return u.String(), nil
+}
+
+func buildBrowserCmd(validatedURL string) *exec.Cmd {
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", rawURL)
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", validatedURL)
 	case "darwin":
-		cmd = exec.Command("open", rawURL)
+		return exec.Command("open", validatedURL)
 	default:
-		cmd = exec.Command("xdg-open", rawURL)
+		return exec.Command("xdg-open", validatedURL)
 	}
+}
+
+func openBrowser(rawURL string) error {
+	validatedURL, err := validateAdURL(rawURL)
+	if err != nil {
+		return err
+	}
+	cmd := buildBrowserCmd(validatedURL)
 	return cmd.Start()
 }
 
