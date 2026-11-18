@@ -58,12 +58,15 @@ func (a *App) authLoginCmd() *cobra.Command {
 				rawCookies = string(data)
 			}
 
-			token, err := milanuncios.ParseCookies(rawCookies)
+			token, wafCookies, err := milanuncios.ParseCookies(rawCookies)
 			if err != nil {
 				return err
 			}
 
 			a.Client.SetSession(token)
+			if len(wafCookies) > 0 {
+				a.Client.SetCookies(wafCookies)
+			}
 
 			// Verify session against Milanuncios API
 			me, err := a.Client.Me(cmd.Context())
@@ -82,6 +85,7 @@ func (a *App) authLoginCmd() *cobra.Command {
 				UserHash:     me.Hash,
 				Email:        me.Email,
 				Name:         me.Name,
+				Cookies:      wafCookies,
 				UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 			}
 

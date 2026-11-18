@@ -3,12 +3,15 @@ package watch_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
+	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/gek0v/milanuncios-cli/internal/watch"
 )
@@ -337,5 +340,70 @@ func TestEngineFavoritesWatch(t *testing.T) {
 	}
 	if res4.Removed != 0 || len(res4.Events) != 0 {
 		t.Fatalf("expected 0 events on subsequent run, got %d", len(res4.Events))
+	}
+}
+
+func TestEngineCheckAllAbortOnBlocked(t *testing.T) {
+	reqCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("Rate limited by Milanuncios"))
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	var onBlockTriggered bool
+	client.OnBlock = func(until time.Time) {
+		onBlockTriggered = true
+	}
+
+	eng := watch.NewEngine(st, client)
+
+	// Add 3 active watches
+	for i := 1; i <= 3; i++ {
+		w := &store.Watch{
+			Type:   "search",
+			Name:   fmt.Sprintf("watch-%d", i),
+			Target: fmt.Sprintf("target-%d", i),
+		}
+		if err := st.AddWatch(w); err != nil {
+			t.Fatalf("failed to add watch %d: %v", i, err)
+		}
+	}
+
+	results, err := eng.CheckAll(context.Background())
+	if err == nil {
+		t.Fatal("expected error from CheckAll, got nil")
+	}
+	if !output.IsKind(err, output.KindBlocked) {
+		t.Fatalf("expected KindBlocked error, got %v", err)
+	}
+
+	// Must have only made 1 request and aborted immediately
+	if reqCount != 1 {
+		t.Fatalf("expected exactly 1 request before aborting, got %d", reqCount)
+	}
+
+	if len(results) != 0 {
+		t.Fatalf("expected 0 successful results, got %d", len(results))
+	}
+
+	if !onBlockTriggered {
+		t.Fatal("expected OnBlock hook to be triggered")
+	}
+
+	if !client.IsBlocked() {
+		t.Fatal("expected client.IsBlocked() to be true")
 	}
 }

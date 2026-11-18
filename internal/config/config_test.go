@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
@@ -97,5 +98,35 @@ func TestResolveProfile(t *testing.T) {
 	os.Unsetenv("MILANUNCIOS_PROFILE")
 	if p := config.ResolveProfile("", cfg); p != "configured-default" {
 		t.Errorf("expected 'configured-default', got %q", p)
+	}
+}
+
+func TestSavePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgDir := filepath.Join(tmpDir, "sub")
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+
+	cfg := config.New()
+	cfg.Proxy = "http://user:secret@127.0.0.1:8080"
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(cfgPath)
+		if err != nil {
+			t.Fatalf("stat config file: %v", err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Errorf("expected 0600 file permissions, got %#o", fi.Mode().Perm())
+		}
+
+		di, err := os.Stat(cfgDir)
+		if err != nil {
+			t.Fatalf("stat config dir: %v", err)
+		}
+		if di.Mode().Perm() != 0700 {
+			t.Errorf("expected 0700 dir permissions, got %#o", di.Mode().Perm())
+		}
 	}
 }

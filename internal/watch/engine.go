@@ -411,6 +411,12 @@ func (e *Engine) CheckAll(ctx context.Context) ([]CheckResult, error) {
 		}
 		res, err := e.CheckWatch(ctx, &w)
 		if err != nil {
+			if output.IsKind(err, output.KindBlocked) {
+				if e.Notice != nil {
+					e.Notice(fmt.Sprintf("watch %d (%s) blocked by anti-bot mitigation; aborting check cycle", w.ID, w.Name))
+				}
+				return results, err
+			}
 			if e.Notice != nil {
 				e.Notice(fmt.Sprintf("watch %d (%s) failed: %v", w.ID, w.Name, err))
 			}

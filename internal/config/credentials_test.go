@@ -30,7 +30,11 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 		UserHash:     "u-hash-abc",
 		Email:        "user@example.com",
 		Name:         "Pedro",
-		UpdatedAt:    "2026-11-16T18:00:00Z",
+		Cookies: map[string]string{
+			"datadome":     "dd-cookie-value-xyz",
+			"cf_clearance": "cf-cookie-val-987",
+		},
+		UpdatedAt: "2026-11-16T18:00:00Z",
 	}
 
 	err := config.SaveCredentials(path, creds)
@@ -49,6 +53,9 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 	}
 	if p.SessionToken != "token-secret-12345" || p.UserHash != "u-hash-abc" || p.Email != "user@example.com" {
 		t.Fatalf("unexpected credentials content: %+v", p)
+	}
+	if p.Cookies["datadome"] != "dd-cookie-value-xyz" || p.Cookies["cf_clearance"] != "cf-cookie-val-987" {
+		t.Fatalf("unexpected cookies content: %+v", p.Cookies)
 	}
 
 	// Test remove profile

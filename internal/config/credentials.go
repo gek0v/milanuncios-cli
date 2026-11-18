@@ -12,11 +12,12 @@ import (
 
 // ProfileCredentials holds authenticated session references for one profile.
 type ProfileCredentials struct {
-	SessionToken string `toml:"session_token,omitempty"`
-	UserHash     string `toml:"user_hash,omitempty"`
-	Email        string `toml:"email,omitempty"`
-	Name         string `toml:"name,omitempty"`
-	UpdatedAt    string `toml:"updated_at,omitempty"`
+	SessionToken string            `toml:"session_token,omitempty"`
+	UserHash     string            `toml:"user_hash,omitempty"`
+	Email        string            `toml:"email,omitempty"`
+	Name         string            `toml:"name,omitempty"`
+	Cookies      map[string]string `toml:"cookies,omitempty"`
+	UpdatedAt    string            `toml:"updated_at,omitempty"`
 }
 
 // Credentials holds credentials for all profiles stored securely in credentials.toml.

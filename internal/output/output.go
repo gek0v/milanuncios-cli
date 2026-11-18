@@ -246,6 +246,18 @@ func (e *DomainError) Error() string {
 	return e.Msg
 }
 
+// IsKind reports whether err is or wraps a *DomainError of the specified Kind.
+func IsKind(err error, kind Kind) bool {
+	if err == nil {
+		return false
+	}
+	var de *DomainError
+	if errors.As(err, &de) {
+		return de.Kind == kind
+	}
+	return false
+}
+
 // UsageError marks mistakes made in command flags or arguments.
 type UsageError struct {
 	Msg string

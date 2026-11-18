@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
+	"github.com/gek0v/milanuncios-cli/internal/store"
 )
 
 func setupChatMockServer(t *testing.T) (*httptest.Server, *map[string]any) {
@@ -611,5 +613,73 @@ func TestChatWatch(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Fatalf("expected no events emitted on second run (deduplicated), got: %s", stdout.String())
 		}
+	}
+}
+
+func TestChatWatchCircuitBreaker(t *testing.T) {
+	reqCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error": "rate limit reached"}`))
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "chat_circuit.db")
+	t.Setenv("MILANUNCIOS_STATE_DB", dbPath)
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(tmpDir, "config.toml"))
+
+	app := cli.NewApp("test")
+	app.Client.BaseURL = ts.URL
+	app.Client.SessionToken = "valid-token"
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"chat", "watch", "--once"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error from chat watch on 429, got nil")
+	}
+
+	// Verify blocked_until was persisted to state.db
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	until, err := st.GetBlockedUntil()
+	if err != nil {
+		t.Fatalf("failed to get blocked until: %v", err)
+	}
+	if until == nil {
+		t.Fatal("expected blocked_until to be saved in state.db")
+	}
+	if time.Now().After(*until) {
+		t.Errorf("expected blocked_until to be in the future, got %v", *until)
+	}
+
+	// Second run should pause without hitting the server
+	app2 := cli.NewApp("test")
+	app2.Client.BaseURL = ts.URL
+	app2.Client.SessionToken = "valid-token"
+	stdout.Reset()
+	stderr.Reset()
+	app2.Stdout = &stdout
+	app2.Stderr = &stderr
+	cmd2 := app2.RootCmd()
+	cmd2.SetArgs([]string{"chat", "watch", "--once"})
+	_ = cmd2.Execute()
+
+	if reqCount != 1 {
+		t.Errorf("expected only 1 server request due to cooldown, got %d", reqCount)
+	}
+	if !strings.Contains(stderr.String(), "paused") && !strings.Contains(stderr.String(), "cooling down") {
+		t.Errorf("expected stderr to report pause/cooling down, got: %s", stderr.String())
 	}
 }

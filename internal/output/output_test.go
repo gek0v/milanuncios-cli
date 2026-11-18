@@ -191,3 +191,27 @@ func TestTableAndTruncate(t *testing.T) {
 		t.Fatalf("expected truncated string length <= 8, got %q", truncated)
 	}
 }
+
+func TestIsKind(t *testing.T) {
+	err := &output.DomainError{Kind: output.KindBlocked, Msg: "blocked"}
+	if !output.IsKind(err, output.KindBlocked) {
+		t.Errorf("expected IsKind(KindBlocked) to be true")
+	}
+	if output.IsKind(err, output.KindAuth) {
+		t.Errorf("expected IsKind(KindAuth) to be false")
+	}
+
+	wrapped := fmt.Errorf("wrapped: %w", err)
+	if !output.IsKind(wrapped, output.KindBlocked) {
+		t.Errorf("expected IsKind on wrapped error to be true")
+	}
+
+	if output.IsKind(nil, output.KindBlocked) {
+		t.Errorf("expected IsKind(nil) to be false")
+	}
+
+	stdErr := errors.New("regular error")
+	if output.IsKind(stdErr, output.KindBlocked) {
+		t.Errorf("expected IsKind(regular error) to be false")
+	}
+}

@@ -3,8 +3,11 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
 	"github.com/gek0v/milanuncios-cli/internal/store"
@@ -104,5 +107,86 @@ func TestWatchAddFavorites(t *testing.T) {
 		if len(list) != 2 {
 			t.Fatalf("expected 2 watches, got %d", len(list))
 		}
+	}
+}
+
+func TestWatchCircuitBreakerPersistence(t *testing.T) {
+	reqCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		w.Header().Set("Retry-After", "90")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error": "rate limit reached"}`))
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "watch_circuit.db")
+	t.Setenv("MILANUNCIOS_STATE_DB", dbPath)
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(tmpDir, "config.toml"))
+
+	// Setup a watch in SQLite
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "test-watch",
+		Target: "portatil",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("failed to add watch: %v", err)
+	}
+	st.Close()
+
+	app := cli.NewApp("test")
+	app.Client.BaseURL = ts.URL
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"watch", "check", "test-watch"})
+
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error on 429 block, got nil")
+	}
+
+	// Verify blocked_until was saved in state.db
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen store: %v", err)
+	}
+	defer st2.Close()
+
+	until, err := st2.GetBlockedUntil()
+	if err != nil {
+		t.Fatalf("failed to read blocked until: %v", err)
+	}
+	if until == nil {
+		t.Fatal("expected non-nil blocked_until in state.db")
+	}
+	if time.Now().After(*until) {
+		t.Errorf("expected blocked_until in the future, got %v", *until)
+	}
+
+	// Another command run should be rejected by circuit breaker without network call
+	app2 := cli.NewApp("test")
+	app2.Client.BaseURL = ts.URL
+	stdout.Reset()
+	stderr.Reset()
+	app2.Stdout = &stdout
+	app2.Stderr = &stderr
+	cmd2 := app2.RootCmd()
+	cmd2.SetArgs([]string{"watch", "check", "test-watch"})
+
+	err2 := cmd2.Execute()
+	if err2 == nil {
+		t.Fatal("expected error from circuit breaker rejection, got nil")
+	}
+	if reqCount != 1 {
+		t.Errorf("expected server to only receive 1 request, got %d", reqCount)
 	}
 }

@@ -208,6 +208,9 @@ func (a *App) chatWatchCmd() *cobra.Command {
 
 					details, err := a.Client.GetConversation(ctx, c.ID)
 					if err != nil {
+						if output.IsKind(err, output.KindBlocked) {
+							return err
+						}
 						if !once {
 							fmt.Fprintf(a.Stderr, "failed to get conversation %s: %v\n", c.ID, err)
 						}
@@ -274,15 +277,57 @@ func (a *App) chatWatchCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
+			var blockedUntil time.Time
+			if stored, err := st.GetBlockedUntil(); err == nil && stored != nil {
+				if time.Now().Before(*stored) {
+					blockedUntil = *stored
+					a.Client.SetBlockedUntil(*stored)
+					fmt.Fprintf(a.Stderr, "circuit breaker active: cooling down until %s\n", stored.Local().Format("15:04:05"))
+				}
+			}
+
+			prevOnBlock := a.Client.OnBlock
+			a.Client.OnBlock = func(until time.Time) {
+				blockedUntil = until
+				_ = st.SetBlockedUntil(until)
+				if prevOnBlock != nil {
+					prevOnBlock(until)
+				}
+				fmt.Fprintf(a.Stderr, "circuit breaker triggered: paused until %s\n", until.Local().Format("15:04:05"))
+			}
+
+			runCycle := func() error {
+				if !blockedUntil.IsZero() && time.Now().Before(blockedUntil) {
+					fmt.Fprintf(a.Stderr, "chat check paused (cooling down until %s)\n", blockedUntil.Local().Format("15:04:05"))
+					return nil
+				}
+				err := checkCycle(ctx)
+				if err != nil {
+					if output.IsKind(err, output.KindBlocked) {
+						fmt.Fprintf(a.Stderr, "chat check aborted due to anti-bot block (cooling down until %s)\n", blockedUntil.Local().Format("15:04:05"))
+						return err
+					}
+					return err
+				}
+				if !blockedUntil.IsZero() && time.Now().After(blockedUntil) {
+					blockedUntil = time.Time{}
+					_ = st.ClearBlockedUntil()
+					a.Client.ClearBlock()
+				}
+				return nil
+			}
+
 			if once {
-				return checkCycle(ctx)
+				return runCycle()
 			}
 
 			fmt.Fprintf(a.Stderr, "milanuncios-cli chat monitor running (interval: %ds). Press Ctrl+C to stop.\n", sec)
 
 			// Initial check
-			if err := checkCycle(ctx); err != nil {
-				fmt.Fprintf(a.Stderr, "initial chat check error: %v\n", err)
+			if err := runCycle(); err != nil {
+				if !output.IsKind(err, output.KindBlocked) {
+					fmt.Fprintf(a.Stderr, "initial chat check error: %v\n", err)
+				}
 			}
 
 			ticker := time.NewTicker(time.Duration(sec) * time.Second)
@@ -297,8 +342,10 @@ func (a *App) chatWatchCmd() *cobra.Command {
 						Msg:  "chat monitor interrupted by signal",
 					}
 				case <-ticker.C:
-					if err := checkCycle(ctx); err != nil {
-						fmt.Fprintf(a.Stderr, "chat check error: %v\n", err)
+					if err := runCycle(); err != nil {
+						if !output.IsKind(err, output.KindBlocked) {
+							fmt.Fprintf(a.Stderr, "chat check error: %v\n", err)
+						}
 					}
 				}
 			}
