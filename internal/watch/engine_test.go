@@ -3,10 +3,12 @@ package watch_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/store"
@@ -337,5 +339,177 @@ func TestEngineFavoritesWatch(t *testing.T) {
 	}
 	if res4.Removed != 0 || len(res4.Events) != 0 {
 		t.Fatalf("expected 0 events on subsequent run, got %d", len(res4.Events))
+	}
+}
+
+func TestEngineDiffingTransactionalRollback(t *testing.T) {
+	var returnItems []milanuncios.AdItem
+	var cancelOnRequest func()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cancelOnRequest != nil {
+			cancelOnRequest()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		res := milanuncios.SearchResult{
+			Items: returnItems,
+			Total: len(returnItems),
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "tx_rollback.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	eng := watch.NewEngine(st, client)
+
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "tx-watch",
+		Target: "tx target",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// 1. Baseline run with 1 item
+	returnItems = []milanuncios.AdItem{
+		{ID: "ad-base", Title: "Base ad", Price: 100},
+	}
+	if _, err := eng.CheckWatch(context.Background(), w); err != nil {
+		t.Fatalf("baseline run failed: %v", err)
+	}
+
+	// 2. Next run: 10 new ads arrive, but context is canceled mid-flight
+	returnItems = []milanuncios.AdItem{
+		{ID: "ad-base", Title: "Base ad", Price: 100},
+	}
+	for i := 1; i <= 10; i++ {
+		returnItems = append(returnItems, milanuncios.AdItem{
+			ID:    fmt.Sprintf("ad-new-%d", i),
+			Title: fmt.Sprintf("New ad %d", i),
+			Price: float64(200 + i*10),
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelOnRequest = cancel // cancel context when HTTP search is being handled
+
+	_, err = eng.CheckWatch(ctx, w)
+	if err == nil {
+		t.Fatal("expected error from canceled context during diffing, got nil")
+	}
+
+	// Verify rollback: seen items must still only contain "ad-base"
+	seenMap, err := st.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items: %v", err)
+	}
+	if len(seenMap) != 1 {
+		t.Fatalf("expected transaction rollback leaving only 1 seen item, but found %d items", len(seenMap))
+	}
+	if _, ok := seenMap["ad-base"]; !ok {
+		t.Fatal("expected ad-base to be present")
+	}
+
+	// Events must be 0
+	events, err := st.ListEvents(w.ID, 50)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events after rollback, got %d", len(events))
+	}
+
+	// 3. Next normal run with healthy context: all 10 new ads should be successfully committed
+	cancelOnRequest = nil
+	resHealthy, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("healthy run failed: %v", err)
+	}
+	if resHealthy.NewItems != 10 || len(resHealthy.Events) != 10 {
+		t.Fatalf("expected 10 new items and 10 events, got %d items and %d events", resHealthy.NewItems, len(resHealthy.Events))
+	}
+
+	seenMapAfter, err := st.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items after healthy: %v", err)
+	}
+	if len(seenMapAfter) != 11 {
+		t.Fatalf("expected 11 seen items total, got %d", len(seenMapAfter))
+	}
+}
+
+func TestEngineAutomaticRetentionPruning(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		res := milanuncios.SearchResult{
+			Items: []milanuncios.AdItem{
+				{ID: "ad-active", Title: "Active ad", Price: 150},
+			},
+			Total: 1,
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "auto_prune.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	w := &store.Watch{
+		Type:   "search",
+		Name:   "prune-watch",
+		Target: "prune target",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// Insert an expired seen item directly (45 days old)
+	now := time.Now().UTC()
+	oldItem := &store.SeenItem{
+		WatchID:     w.ID,
+		AdID:        "ad-expired",
+		FirstSeenAt: now.Add(-50 * 24 * time.Hour),
+		LastSeenAt:  now.Add(-45 * 24 * time.Hour),
+		LastPrice:   50,
+		LastTitle:   "Expired item",
+		RawJSON:     `{}`,
+	}
+	if err := st.UpsertSeenItem(oldItem); err != nil {
+		t.Fatalf("upsert old item: %v", err)
+	}
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	eng := watch.NewEngine(st, client)
+	eng.SeenItemsTTL = 30 * 24 * time.Hour
+
+	// Check watch: this should automatically prune the expired item
+	_, err = eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("check watch failed: %v", err)
+	}
+
+	seenMap, err := st.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items: %v", err)
+	}
+	if _, ok := seenMap["ad-expired"]; ok {
+		t.Error("expected ad-expired to be pruned during CheckWatch")
+	}
+	if _, ok := seenMap["ad-active"]; !ok {
+		t.Error("expected ad-active to be present in seen items")
 	}
 }
