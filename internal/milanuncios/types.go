@@ -26,30 +26,128 @@ type AdSeller struct {
 	Type string `json:"type,omitempty"` // "particular" or "profesional"
 }
 
-// AdItem represents a single ad listing on Milanuncios.
-type AdItem struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description,omitempty"`
-	Price       float64    `json:"price"`
-	Currency    string     `json:"currency"`
-	Location    AdLocation `json:"location"`
-	Photos      []string   `json:"photos,omitempty"`
-	URL         string     `json:"url"`
-	Seller      AdSeller   `json:"seller"`
-	Category    int        `json:"category,omitempty"`
-	PublishedAt string     `json:"published_at,omitempty"`
-	ModifiedAt  string     `json:"modified_at,omitempty"`
+// UploadedPhoto represents an image associated with an ad listing.
+type UploadedPhoto struct {
+	Index   int    `json:"index"`
+	Source  string `json:"source,omitempty"`
+	MediaID string `json:"media_id,omitempty"`
+	URL     string `json:"url"`
 }
 
-// Pretty renders a detailed view of an ad.
+// UnmarshalJSON supports unmarshaling UploadedPhoto from either a plain string (URL)
+// or a JSON object with index, source, media_id, and url.
+func (p *UploadedPhoto) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		p.URL = s
+		p.Source = s
+		return nil
+	}
+	type Alias UploadedPhoto
+	var aux Alias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*p = UploadedPhoto(aux)
+	return nil
+}
+
+// AdItem represents a single ad listing on Milanuncios.
+type AdItem struct {
+	ID              string          `json:"id"`
+	ClientRequestID string          `json:"client_request_id,omitempty"`
+	Status          string          `json:"status,omitempty"`
+	Title           string          `json:"title"`
+	Description     string          `json:"description,omitempty"`
+	Price           float64         `json:"price"`
+	Currency        string          `json:"currency,omitempty"`
+	Negotiable      bool            `json:"negotiable,omitempty"`
+	Location        AdLocation      `json:"location,omitempty"`
+	Photos          []UploadedPhoto `json:"photos,omitempty"`
+	URL             string          `json:"url"`
+	Seller          AdSeller        `json:"seller,omitempty"`
+	Category        int             `json:"category,omitempty"`
+	CategoryID      int             `json:"category_id,omitempty"`
+	PublishedAt     string          `json:"published_at,omitempty"`
+	ModifiedAt      string          `json:"modified_at,omitempty"`
+	CreatedAt       string          `json:"created_at,omitempty"`
+	ExpiresAt       string          `json:"expires_at,omitempty"`
+}
+
+// AdPublishResult represents the confirmation of a newly published listing.
+type AdPublishResult = AdItem
+
+// PhotoURLs returns a slice of photo URLs.
+func (a *AdItem) PhotoURLs() []string {
+	urls := make([]string, len(a.Photos))
+	for i, p := range a.Photos {
+		if p.URL != "" {
+			urls[i] = p.URL
+		} else {
+			urls[i] = p.Source
+		}
+	}
+	return urls
+}
+
+// Pretty renders a detailed view of an ad or published listing confirmation.
 func (a *AdItem) Pretty(w io.Writer, color bool) {
+	if a == nil {
+		return
+	}
 	priceStr := fmt.Sprintf("%.0f %s", a.Price, a.Currency)
 	if a.Currency == "" {
 		priceStr = fmt.Sprintf("%.0f €", a.Price)
 	}
 	if a.Price == 0 {
 		priceStr = "Gratis"
+	}
+
+	if a.Status == "published" {
+		if color {
+			fmt.Fprintf(w, "\x1b[32m✔ Ad published successfully!\x1b[0m (ID: %s)\n", a.ID)
+		} else {
+			fmt.Fprintf(w, "✔ Ad published successfully! (ID: %s)\n", a.ID)
+		}
+		if a.ClientRequestID != "" {
+			fmt.Fprintf(w, "Client Request ID: %s\n", a.ClientRequestID)
+		}
+		fmt.Fprintf(w, "Title: %s  (%s)\n", a.Title, priceStr)
+		if a.URL != "" {
+			fmt.Fprintf(w, "URL: %s\n", a.URL)
+		}
+		catID := a.CategoryID
+		if catID == 0 {
+			catID = a.Category
+		}
+		if catID > 0 {
+			fmt.Fprintf(w, "Category ID: %d\n", catID)
+		}
+		createdAt := a.CreatedAt
+		if createdAt == "" {
+			createdAt = a.PublishedAt
+		}
+		if createdAt != "" {
+			fmt.Fprintf(w, "Created At: %s\n", createdAt)
+		}
+		if a.ExpiresAt != "" {
+			fmt.Fprintf(w, "Expires At: %s\n", a.ExpiresAt)
+		}
+		if len(a.Photos) > 0 {
+			fmt.Fprintf(w, "Photos uploaded (%d):\n", len(a.Photos))
+			for i, p := range a.Photos {
+				target := p.URL
+				if target == "" {
+					target = p.Source
+				}
+				if p.MediaID != "" {
+					fmt.Fprintf(w, "  [%d] %s (media: %s)\n", i+1, target, p.MediaID)
+				} else {
+					fmt.Fprintf(w, "  [%d] %s\n", i+1, target)
+				}
+			}
+		}
+		return
 	}
 
 	if color {
@@ -83,12 +181,72 @@ func (a *AdItem) Pretty(w io.Writer, color bool) {
 	if len(a.Photos) > 0 {
 		fmt.Fprintf(w, "Fotos (%d):\n", len(a.Photos))
 		for i, photo := range a.Photos {
-			fmt.Fprintf(w, "  [%d] %s\n", i+1, photo)
+			u := photo.URL
+			if u == "" {
+				u = photo.Source
+			}
+			fmt.Fprintf(w, "  [%d] %s\n", i+1, u)
 		}
 	}
 
 	if a.Description != "" {
 		fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(a.Description))
+	}
+}
+
+// AdUpdateResult represents the outcome of an ad update operation.
+type AdUpdateResult struct {
+	ID            string   `json:"id"`
+	UpdatedFields []string `json:"updated_fields"`
+	PreviousPrice float64  `json:"previous_price,omitempty"`
+	NewPrice      float64  `json:"new_price,omitempty"`
+	UpdatedAt     string   `json:"updated_at"`
+}
+
+// Pretty prints the ad update result in human-readable terminal format.
+func (r *AdUpdateResult) Pretty(w io.Writer, color bool) {
+	if r == nil {
+		return
+	}
+	if color {
+		fmt.Fprintf(w, "\x1b[32m✔ Ad updated successfully (#%s)\x1b[0m\n", r.ID)
+	} else {
+		fmt.Fprintf(w, "✔ Ad updated successfully (#%s)\n", r.ID)
+	}
+	if len(r.UpdatedFields) > 0 {
+		fmt.Fprintf(w, "Updated fields: %s\n", strings.Join(r.UpdatedFields, ", "))
+	}
+	if r.PreviousPrice > 0 || r.NewPrice > 0 {
+		fmt.Fprintf(w, "Price change: %.2f € -> %.2f €\n", r.PreviousPrice, r.NewPrice)
+	}
+	if r.UpdatedAt != "" {
+		fmt.Fprintf(w, "Updated at: %s\n", r.UpdatedAt)
+	}
+}
+
+// AdDeleteResult represents the outcome of an ad delete or withdrawal operation.
+type AdDeleteResult struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message,omitempty"`
+}
+
+// Pretty prints the ad delete result in human-readable terminal format.
+func (r *AdDeleteResult) Pretty(w io.Writer, color bool) {
+	if r == nil {
+		return
+	}
+	if color {
+		fmt.Fprintf(w, "\x1b[32m✔ Ad deleted/withdrawn successfully (#%s)\x1b[0m\n", r.ID)
+	} else {
+		fmt.Fprintf(w, "✔ Ad deleted/withdrawn successfully (#%s)\n", r.ID)
+	}
+	fmt.Fprintf(w, "ID: %s\n", r.ID)
+	fmt.Fprintf(w, "Status: %s\n", r.Status)
+	fmt.Fprintf(w, "Reason: %s\n", r.Reason)
+	if r.Message != "" {
+		fmt.Fprintf(w, "Message: %s\n", r.Message)
 	}
 }
 

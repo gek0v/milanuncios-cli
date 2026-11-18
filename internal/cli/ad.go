@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
@@ -29,6 +30,8 @@ func (a *App) adCmd() *cobra.Command {
 		a.adUnfavoriteCmd(),
 		a.adSchemaCmd(),
 		a.adCreateCmd(),
+		a.adUpdateCmd(),
+		a.adDeleteCmd(),
 	)
 
 	return cmd
@@ -62,7 +65,7 @@ func (a *App) adImagesCmd() *cobra.Command {
 
 			result := &milanuncios.ImagesResult{
 				AdID:   item.ID,
-				Photos: item.Photos,
+				Photos: item.PhotoURLs(),
 			}
 			return a.Printer.Print(result)
 		},
@@ -222,31 +225,176 @@ By default, --dry-run is true to simulate validation without creating the listin
 				return output.Usagef("invalid JSON ad spec: %v", err)
 			}
 
+			if !dryRun && a.Client.SessionToken == "" {
+				return &output.DomainError{
+					Kind:     output.KindAuth,
+					Endpoint: "POST /api/v1/ads",
+					Msg:      "publishing an ad requires an authenticated profile. Run `milanuncios auth login`",
+				}
+			}
+
+			if dryRun {
+				report, err := a.Client.ValidateAdSpec(cmd.Context(), &spec)
+				if err != nil {
+					return err
+				}
+
+				if err := a.Printer.Print(report); err != nil {
+					return err
+				}
+
+				if !report.Valid {
+					return output.Usagef("ad validation failed with %d error(s)", len(report.Errors))
+				}
+
+				return nil
+			}
+
+			// Non-dry-run: validate first so invalid spec prints report with exit code 2
 			report, err := a.Client.ValidateAdSpec(cmd.Context(), &spec)
 			if err != nil {
 				return err
 			}
-
-			if err := a.Printer.Print(report); err != nil {
-				return err
-			}
-
 			if !report.Valid {
+				_ = a.Printer.Print(report)
 				return output.Usagef("ad validation failed with %d error(s)", len(report.Errors))
 			}
 
-			if dryRun {
-				return nil
+			ad, err := a.Client.CreateAd(cmd.Context(), &spec)
+			if err != nil {
+				return err
 			}
-
-			fmt.Fprintln(a.Stderr, "Notice: dry-run validation succeeded. Real ad publishing endpoint will activate in Slice 13.")
-			return nil
+			return a.Printer.Print(ad)
 		},
 	}
 
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "path to ad spec JSON file or '-' for stdin")
 	cmd.Flags().StringVar(&inlineSpec, "spec", "", "inline ad spec JSON payload")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "simulate validation without creating listing")
+
+	return cmd
+}
+
+func (a *App) adUpdateCmd() *cobra.Command {
+	var (
+		inlineSpec  string
+		patchFile   string
+		price       float64
+		title       string
+		description string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "update <id>",
+		Short: "Update an existing ad listing using RFC 7396 JSON merge patch",
+		Long: `Update an existing ad listing with partial patch object.
+
+Supports inline patch (--spec '{"price": 1200}'), patch file (--patch-file <path> or - for stdin),
+or shortcut flags (--price, --title, --description).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if inlineSpec != "" && patchFile != "" {
+				return output.Usagef("cannot specify both --spec and --patch-file")
+			}
+
+			patch := make(map[string]interface{})
+
+			if inlineSpec != "" {
+				if err := json.Unmarshal([]byte(inlineSpec), &patch); err != nil {
+					return output.Usagef("invalid JSON patch in --spec: %v", err)
+				}
+			} else if patchFile != "" {
+				var patchBytes []byte
+				if patchFile == "-" {
+					var err error
+					patchBytes, err = io.ReadAll(cmd.InOrStdin())
+					if err != nil {
+						return fmt.Errorf("reading stdin: %w", err)
+					}
+				} else {
+					var err error
+					patchBytes, err = os.ReadFile(patchFile)
+					if err != nil {
+						return output.Usagef("reading patch file %q: %v", patchFile, err)
+					}
+				}
+				if len(bytes.TrimSpace(patchBytes)) == 0 {
+					return output.Usagef("patch file payload is empty")
+				}
+				if err := json.Unmarshal(patchBytes, &patch); err != nil {
+					return output.Usagef("invalid JSON patch in --patch-file: %v", err)
+				}
+			}
+
+			if cmd.Flags().Changed("price") {
+				if price <= 0 {
+					return output.Usagef("price must be greater than 0")
+				}
+				patch["price"] = price
+			}
+			if cmd.Flags().Changed("title") {
+				if strings.TrimSpace(title) == "" {
+					return output.Usagef("title cannot be empty")
+				}
+				patch["title"] = strings.TrimSpace(title)
+			}
+			if cmd.Flags().Changed("description") {
+				if strings.TrimSpace(description) == "" {
+					return output.Usagef("description cannot be empty")
+				}
+				patch["description"] = strings.TrimSpace(description)
+			}
+
+			if len(patch) == 0 {
+				return output.Usagef("no update fields provided. Specify --spec, --patch-file, or shortcuts (--price, --title, --description)")
+			}
+
+			result, err := a.Client.UpdateAd(cmd.Context(), args[0], patch)
+			if err != nil {
+				return err
+			}
+
+			return a.Printer.Print(result)
+		},
+	}
+
+	cmd.Flags().StringVar(&inlineSpec, "spec", "", "inline JSON patch object")
+	cmd.Flags().StringVar(&patchFile, "patch-file", "", "path to JSON patch file or '-' for stdin")
+	cmd.Flags().Float64Var(&price, "price", 0, "new price in Euros")
+	cmd.Flags().StringVar(&title, "title", "", "new ad title")
+	cmd.Flags().StringVar(&description, "description", "", "new ad description")
+
+	return cmd
+}
+
+func (a *App) adDeleteCmd() *cobra.Command {
+	var (
+		reason   string
+		feedback string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Delete or withdraw an active ad listing",
+		Long: `Withdraw or remove an active ad listing with a structured reason.
+
+Valid reasons:
+  - sold_milanuncios: Item sold through Milanuncios
+  - sold_other: Item sold via another platform or offline
+  - withdrawn: Listing withdrawn by seller (default)
+  - expired: Listing is no longer available or valid`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res, err := a.Client.DeleteAd(cmd.Context(), args[0], reason, feedback)
+			if err != nil {
+				return err
+			}
+			return a.Printer.Print(res)
+		},
+	}
+
+	cmd.Flags().StringVarP(&reason, "reason", "r", "withdrawn", "reason for deletion (sold_milanuncios, sold_other, withdrawn, expired)")
+	cmd.Flags().StringVar(&feedback, "feedback", "", "optional closing feedback or comments")
 
 	return cmd
 }

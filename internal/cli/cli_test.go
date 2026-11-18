@@ -291,9 +291,9 @@ func TestAdCommands(t *testing.T) {
 				ID:    "492817294",
 				Title: "Mesa de centro",
 				Price: 40,
-				Photos: []string{
-					"https://img.milanuncios.com/1.jpg",
-					"https://img.milanuncios.com/2.jpg",
+				Photos: []milanuncios.UploadedPhoto{
+					{Index: 0, URL: "https://img.milanuncios.com/1.jpg"},
+					{Index: 1, URL: "https://img.milanuncios.com/2.jpg"},
 				},
 				URL: "https://www.milanuncios.com/anuncios/492817294.htm",
 			}

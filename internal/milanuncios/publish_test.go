@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -373,5 +374,431 @@ func TestValidateAdSpecCategoryNotFound(t *testing.T) {
 
 	if len(report.Errors) != 1 || report.Errors[0].Code != "E_VAL_CATEGORY_NOT_FOUND" {
 		t.Errorf("expected E_VAL_CATEGORY_NOT_FOUND error, got: %+v", report.Errors)
+	}
+}
+
+func setupPublishMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/categories/11/filters":
+			res := milanuncios.CategoryFiltersResult{
+				CategoryID:   11,
+				CategoryName: "Coches de segunda mano",
+				Filters: []milanuncios.FilterDefinition{
+					{
+						Key:     "fuel",
+						Label:   "Combustible",
+						Type:    "select",
+						Options: []string{"diesel", "gasolina"},
+					},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(res)
+
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/media/upload":
+			// Validate multipart/form-data
+			if !strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error": "expected multipart/form-data"}`))
+				return
+			}
+			err := r.ParseMultipartForm(16 << 20)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error": "invalid multipart form"}`))
+				return
+			}
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error": "missing file field"}`))
+				return
+			}
+			file.Close()
+
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"media_id": "media-m-991203", "url": "https://img.milanuncios.com/fotos/media-m-991203.jpg"}`))
+
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/ads":
+			if r.Header.Get("Authorization") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
+				return
+			}
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error": "invalid json body"}`))
+				return
+			}
+			resp := map[string]interface{}{
+				"id":                "492817294",
+				"client_request_id": body["client_request_id"],
+				"status":            "published",
+				"title":             body["title"],
+				"price":             body["price"],
+				"category_id":       body["category_id"],
+				"url":               "https://www.milanuncios.com/coches-de-segunda-mano/volkswagen-golf-492817294.htm",
+				"created_at":        "2026-11-18T08:50:00Z",
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/ads/492817294":
+			if r.Header.Get("Authorization") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
+				return
+			}
+			var patch map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&patch)
+			var updatedFields []string
+			for k := range patch {
+				updatedFields = append(updatedFields, k)
+			}
+			sort.Strings(updatedFields)
+			resp := map[string]interface{}{
+				"id":             "492817294",
+				"updated_fields": updatedFields,
+				"previous_price": 13900.0,
+				"new_price":      patch["price"],
+				"updated_at":     "2026-11-18T09:15:00Z",
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/ads/404":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error": "ad not found"}`))
+
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/ads/492817294":
+			if r.Header.Get("Authorization") == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error": "unauthorized"}`))
+				return
+			}
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			resp := map[string]interface{}{
+				"id":      "492817294",
+				"status":  "deleted",
+				"reason":  payload["reason"],
+				"message": "Listing deleted successfully",
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/ads/404":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error": "ad not found"}`))
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error": "not found"}`))
+		}
+	}))
+}
+
+func TestUploadPhoto_LocalFile(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("fake-token")
+
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "sample.jpg")
+	// Write standard JPEG header \xFF\xD8\xFF\xE0
+	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01}
+	if err := os.WriteFile(localFile, jpegBytes, 0644); err != nil {
+		t.Fatalf("failed to write temp jpeg: %v", err)
+	}
+
+	photo, err := client.UploadPhoto(context.Background(), localFile, 0)
+	if err != nil {
+		t.Fatalf("UploadPhoto failed: %v", err)
+	}
+
+	if photo.Index != 0 {
+		t.Errorf("expected index 0, got %d", photo.Index)
+	}
+	if photo.MediaID != "media-m-991203" {
+		t.Errorf("expected media-m-991203, got %s", photo.MediaID)
+	}
+	if photo.URL != "https://img.milanuncios.com/fotos/media-m-991203.jpg" {
+		t.Errorf("expected cdn url, got %s", photo.URL)
+	}
+	if photo.Source != localFile {
+		t.Errorf("expected source to match localFile, got %s", photo.Source)
+	}
+}
+
+func TestUploadPhoto_RemoteURL(t *testing.T) {
+	// Remote image server serving a PNG
+	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n', 0, 0, 0, 0}
+		_, _ = w.Write(pngBytes)
+	}))
+	defer imgServer.Close()
+
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("fake-token")
+
+	remoteURL := imgServer.URL + "/car.png"
+	photo, err := client.UploadPhoto(context.Background(), remoteURL, 1)
+	if err != nil {
+		t.Fatalf("UploadPhoto with remote URL failed: %v", err)
+	}
+
+	if photo.Index != 1 {
+		t.Errorf("expected index 1, got %d", photo.Index)
+	}
+	if photo.MediaID != "media-m-991203" {
+		t.Errorf("expected media-m-991203, got %s", photo.MediaID)
+	}
+}
+
+func TestUploadPhoto_Base64DataURI(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("fake-token")
+
+	// Base64 for JPEG bytes /9j/4AAQSkZJRg==
+	dataURI := "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+	photo, err := client.UploadPhoto(context.Background(), dataURI, 2)
+	if err != nil {
+		t.Fatalf("UploadPhoto with base64 data URI failed: %v", err)
+	}
+
+	if photo.Index != 2 {
+		t.Errorf("expected index 2, got %d", photo.Index)
+	}
+	if photo.MediaID != "media-m-991203" {
+		t.Errorf("expected media-m-991203, got %s", photo.MediaID)
+	}
+}
+
+func TestUploadPhoto_MediaID(t *testing.T) {
+	client := milanuncios.NewClient("test")
+
+	photo, err := client.UploadPhoto(context.Background(), "media://m-88231", 3)
+	if err != nil {
+		t.Fatalf("UploadPhoto with media:// failed: %v", err)
+	}
+
+	if photo.Index != 3 {
+		t.Errorf("expected index 3, got %d", photo.Index)
+	}
+	if photo.MediaID != "m-88231" {
+		t.Errorf("expected m-88231, got %s", photo.MediaID)
+	}
+}
+
+func TestCreateAd_Success(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-session-token")
+
+	spec := &milanuncios.AdSpec{
+		ClientRequestID: "uuid-test-123",
+		CategoryID:      11,
+		Title:           "Volkswagen Golf VII 2.0 TDI Advance",
+		Description:     "Vehículo en impecable estado de conservación con libro de mantenimiento oficial.",
+		Price:           13900.0,
+		Location: milanuncios.AdLocationSpec{
+			Province:     "Madrid",
+			Municipality: "Alcobendas",
+		},
+		Photos: []string{
+			"media://existing-photo-1",
+			"data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+		},
+		Attributes: map[string]interface{}{
+			"fuel": "diesel",
+		},
+	}
+
+	ad, err := client.CreateAd(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("CreateAd failed: %v", err)
+	}
+
+	if ad.ID != "492817294" {
+		t.Errorf("expected ad ID 492817294, got %s", ad.ID)
+	}
+	if ad.Status != "published" {
+		t.Errorf("expected status published, got %s", ad.Status)
+	}
+	if ad.ClientRequestID != "uuid-test-123" {
+		t.Errorf("expected client_request_id uuid-test-123, got %s", ad.ClientRequestID)
+	}
+	if len(ad.Photos) != 2 {
+		t.Fatalf("expected 2 photos, got %d", len(ad.Photos))
+	}
+
+	// Test Pretty output
+	var buf bytes.Buffer
+	ad.Pretty(&buf, false)
+	prettyOut := buf.String()
+	if !strings.Contains(prettyOut, "✔ Ad published successfully!") {
+		t.Errorf("expected pretty header in confirmation, got:\n%s", prettyOut)
+	}
+	if !strings.Contains(prettyOut, "492817294") {
+		t.Errorf("expected ID in pretty output, got:\n%s", prettyOut)
+	}
+}
+
+func TestCreateAd_Unauthenticated(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	// No session token set
+
+	spec := &milanuncios.AdSpec{
+		CategoryID:  11,
+		Title:       "Volkswagen Golf VII 2.0 TDI Advance",
+		Description: "Vehículo en impecable estado de conservación con libro de mantenimiento oficial.",
+		Price:       13900.0,
+		Location: milanuncios.AdLocationSpec{
+			Province: "Madrid",
+		},
+	}
+
+	_, err := client.CreateAd(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected error for unauthenticated CreateAd, got nil")
+	}
+}
+
+func TestCreateAd_ValidationError(t *testing.T) {
+	client := milanuncios.NewClient("test")
+	client.SetSession("fake-token")
+
+	// Invalid spec: title too short
+	spec := &milanuncios.AdSpec{
+		CategoryID:  11,
+		Title:       "Golf",
+		Description: "Short",
+		Price:       0,
+	}
+
+	_, err := client.CreateAd(context.Background(), spec)
+	if err == nil {
+		t.Fatal("expected error for invalid spec, got nil")
+	}
+}
+
+func TestUpdateAd_Success(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-session-token")
+
+	patch := map[string]interface{}{
+		"price":       13500.0,
+		"description": "Actualizado: ITV recién pasada en taller oficial.",
+	}
+
+	result, err := client.UpdateAd(context.Background(), "492817294", patch)
+	if err != nil {
+		t.Fatalf("UpdateAd failed: %v", err)
+	}
+
+	if result.ID != "492817294" {
+		t.Errorf("expected ID 492817294, got %s", result.ID)
+	}
+	if len(result.UpdatedFields) != 2 {
+		t.Errorf("expected 2 updated fields, got %v", result.UpdatedFields)
+	}
+
+	var buf bytes.Buffer
+	result.Pretty(&buf, false)
+	prettyOut := buf.String()
+	if !strings.Contains(prettyOut, "✔ Ad updated successfully") {
+		t.Errorf("expected success header in pretty output, got:\n%s", prettyOut)
+	}
+}
+
+func TestUpdateAd_NotFound(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-session-token")
+
+	_, err := client.UpdateAd(context.Background(), "404", map[string]interface{}{"price": 100})
+	if err == nil {
+		t.Fatal("expected error for 404 ad, got nil")
+	}
+}
+
+func TestDeleteAd_Success(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-session-token")
+
+	result, err := client.DeleteAd(context.Background(), "492817294", "sold_milanuncios", "Vendido en 48 horas")
+	if err != nil {
+		t.Fatalf("DeleteAd failed: %v", err)
+	}
+
+	if result.ID != "492817294" {
+		t.Errorf("expected ID 492817294, got %s", result.ID)
+	}
+	if result.Reason != "sold_milanuncios" {
+		t.Errorf("expected reason sold_milanuncios, got %s", result.Reason)
+	}
+
+	var buf bytes.Buffer
+	result.Pretty(&buf, false)
+	prettyOut := buf.String()
+	if !strings.Contains(prettyOut, "✔ Ad deleted/withdrawn successfully") {
+		t.Errorf("expected success header in pretty output, got:\n%s", prettyOut)
+	}
+}
+
+func TestDeleteAd_InvalidReason(t *testing.T) {
+	client := milanuncios.NewClient("test")
+	client.SetSession("valid-session-token")
+
+	_, err := client.DeleteAd(context.Background(), "492817294", "unsupported_reason", "")
+	if err == nil {
+		t.Fatal("expected error for invalid reason, got nil")
+	}
+}
+
+func TestDeleteAd_NotFound(t *testing.T) {
+	ts := setupPublishMockServer(t)
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("valid-session-token")
+
+	_, err := client.DeleteAd(context.Background(), "404", "withdrawn", "")
+	if err == nil {
+		t.Fatal("expected error for 404 ad, got nil")
 	}
 }

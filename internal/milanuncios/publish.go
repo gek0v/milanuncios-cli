@@ -1,14 +1,24 @@
 package milanuncios
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/output"
 )
@@ -466,4 +476,497 @@ func levenshteinDistance(s1, s2 string) int {
 		}
 	}
 	return column[len1]
+}
+
+// UploadPhoto ingests a single photo reference from local file, remote HTTP/HTTPS URL,
+// base64 data URI, or existing media ID, streams it as multipart/form-data to POST /api/v1/media/upload,
+// and returns the uploaded photo metadata.
+func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*UploadedPhoto, error) {
+	trimmed := strings.TrimSpace(photoRef)
+	if trimmed == "" {
+		return nil, output.Usagef("photo reference cannot be empty")
+	}
+
+	// 1. Existing media ID reference: media://...
+	if strings.HasPrefix(trimmed, "media://") {
+		mediaID := strings.TrimPrefix(trimmed, "media://")
+		return &UploadedPhoto{
+			Index:   index,
+			Source:  trimmed,
+			MediaID: mediaID,
+			URL:     trimmed,
+		}, nil
+	}
+
+	var (
+		data     []byte
+		mimeType string
+		filename string
+	)
+
+	// 2. Remote HTTP/HTTPS URL
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request for remote photo %q: %w", trimmed, err)
+		}
+		req.Header.Set("User-Agent", c.currentUA())
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, c.wrapNetError("GET "+trimmed, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, output.Usagef("remote photo %q returned HTTP %d", trimmed, resp.StatusCode)
+		}
+
+		data, err = io.ReadAll(io.LimitReader(resp.Body, 15*1024*1024+1))
+		if err != nil {
+			return nil, fmt.Errorf("reading remote photo %q: %w", trimmed, err)
+		}
+		if len(data) > 15*1024*1024 {
+			return nil, output.Usagef("remote photo %q exceeds 15 MB limit", trimmed)
+		}
+
+		ct := resp.Header.Get("Content-Type")
+		mimeType = strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
+			mimeType = detectImageMime(data, trimmed)
+		}
+		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
+			return nil, output.Usagef("unsupported remote image format %q (detected: %s)", trimmed, mimeType)
+		}
+		filename = extractFilenameFromURL(trimmed, mimeType)
+
+	} else if strings.HasPrefix(trimmed, "data:") {
+		// 3. Base64 Data URI
+		commaIdx := strings.Index(trimmed, ",")
+		if commaIdx == -1 {
+			return nil, output.Usagef("invalid data URI format: missing comma separator")
+		}
+		header := trimmed[:commaIdx]
+		b64Part := trimmed[commaIdx+1:]
+
+		mimeType = "image/jpeg"
+		headerContent := strings.TrimPrefix(header, "data:")
+		if scIdx := strings.Index(headerContent, ";"); scIdx != -1 {
+			parsedMime := strings.TrimSpace(headerContent[:scIdx])
+			if parsedMime != "" {
+				mimeType = parsedMime
+			}
+		}
+
+		cleanedB64 := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+				return -1
+			}
+			return r
+		}, b64Part)
+
+		var err error
+		data, err = base64.StdEncoding.DecodeString(cleanedB64)
+		if err != nil {
+			data, err = base64.RawStdEncoding.DecodeString(cleanedB64)
+			if err != nil {
+				return nil, output.Usagef("failed to decode base64 photo data: %v", err)
+			}
+		}
+		if len(data) > 15*1024*1024 {
+			return nil, output.Usagef("base64 photo exceeds 15 MB limit")
+		}
+
+		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
+			mimeType = detectImageMime(data, "")
+		}
+		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
+			return nil, output.Usagef("unsupported data URI image format %q", mimeType)
+		}
+		ext := mimeToExt(mimeType)
+		filename = fmt.Sprintf("photo_%d%s", index, ext)
+
+	} else {
+		// 4. Local filesystem path
+		fi, err := os.Stat(trimmed)
+		if err != nil {
+			return nil, output.Usagef("local photo file %q does not exist: %v", trimmed, err)
+		}
+		if fi.IsDir() {
+			return nil, output.Usagef("local photo path %q is a directory", trimmed)
+		}
+		if fi.Size() > 15*1024*1024 {
+			return nil, output.Usagef("photo %q exceeds 15 MB limit (%d bytes)", trimmed, fi.Size())
+		}
+		data, err = os.ReadFile(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("reading local photo file %q: %w", trimmed, err)
+		}
+		mimeType = detectImageMime(data, trimmed)
+		if mimeType != "image/jpeg" && mimeType != "image/png" && mimeType != "image/webp" {
+			return nil, output.Usagef("unsupported local image format %q (%s). Milanuncios accepts JPEG, PNG, or WebP", trimmed, mimeType)
+		}
+		filename = filepath.Base(trimmed)
+	}
+
+	// Build multipart/form-data body
+	bodyBuf := &bytes.Buffer{}
+	mpWriter := multipart.NewWriter(bodyBuf)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
+	h.Set("Content-Type", mimeType)
+	part, err := mpWriter.CreatePart(h)
+	if err != nil {
+		return nil, fmt.Errorf("creating multipart form part: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return nil, fmt.Errorf("writing image data to multipart stream: %w", err)
+	}
+	if err := mpWriter.Close(); err != nil {
+		return nil, fmt.Errorf("closing multipart writer: %w", err)
+	}
+
+	uploadURL := strings.TrimRight(c.BaseURL, "/") + "/api/v1/media/upload"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, bodyBuf)
+	if err != nil {
+		return nil, fmt.Errorf("creating media upload request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.currentUA())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", mpWriter.FormDataContentType())
+	if c.SessionToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.SessionToken)
+		req.Header.Set("Cookie", "token="+c.SessionToken)
+	}
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, c.wrapNetError("POST /api/v1/media/upload", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, c.wrapNetError("POST /api/v1/media/upload", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, &output.DomainError{
+			Kind:     output.KindAuth,
+			Status:   resp.StatusCode,
+			Endpoint: "POST /api/v1/media/upload",
+			Msg:      "media upload requires authentication. Run `milanuncios auth login`",
+		}
+	}
+	if isBotStatus(resp.StatusCode, raw) {
+		if c.OnBlock != nil {
+			c.OnBlock(ctx)
+		}
+		return nil, &output.DomainError{
+			Kind:      output.KindBlocked,
+			Status:    resp.StatusCode,
+			Endpoint:  "POST /api/v1/media/upload",
+			Retryable: true,
+			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
+		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &output.DomainError{
+			Kind:     output.KindGeneric,
+			Status:   resp.StatusCode,
+			Endpoint: "POST /api/v1/media/upload",
+			Msg:      fmt.Sprintf("unexpected HTTP %d from media upload: %s", resp.StatusCode, string(raw)),
+		}
+	}
+
+	var uploadResp struct {
+		MediaID string `json:"media_id"`
+		URL     string `json:"url"`
+		ID      string `json:"id,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &uploadResp); err != nil {
+		return nil, &output.DomainError{
+			Kind:     output.KindAPIChanged,
+			Status:   resp.StatusCode,
+			Endpoint: "POST /api/v1/media/upload",
+			Body:     "json decode: " + err.Error() + "; body: " + string(raw),
+			Msg:      "milanuncios returned an unexpected response structure from media upload",
+		}
+	}
+
+	mediaID := uploadResp.MediaID
+	if mediaID == "" {
+		mediaID = uploadResp.ID
+	}
+	cdnURL := uploadResp.URL
+	if cdnURL == "" {
+		cdnURL = fmt.Sprintf("https://img.milanuncios.com/%s", mediaID)
+	}
+
+	return &UploadedPhoto{
+		Index:   index,
+		Source:  photoRef,
+		MediaID: mediaID,
+		URL:     cdnURL,
+	}, nil
+}
+
+// UploadPhotos uploads multiple photos sequentially and returns their uploaded metadata.
+func (c *Client) UploadPhotos(ctx context.Context, photoRefs []string) ([]UploadedPhoto, error) {
+	uploaded := make([]UploadedPhoto, 0, len(photoRefs))
+	for i, ref := range photoRefs {
+		photo, err := c.UploadPhoto(ctx, ref, i)
+		if err != nil {
+			return nil, fmt.Errorf("uploading photo [%d] %q: %w", i, ref, err)
+		}
+		uploaded = append(uploaded, *photo)
+	}
+	return uploaded, nil
+}
+
+// CreateAd validates the ad specification, uploads all photos in sequence,
+// and publishes the listing to the Milanuncios API.
+func (c *Client) CreateAd(ctx context.Context, spec *AdSpec) (*AdItem, error) {
+	if spec == nil {
+		return nil, output.Usagef("ad spec cannot be nil")
+	}
+
+	if c.SessionToken == "" {
+		return nil, &output.DomainError{
+			Kind:     output.KindAuth,
+			Endpoint: "POST /api/v1/ads",
+			Msg:      "publishing an ad requires an authenticated profile. Run `milanuncios auth login`",
+		}
+	}
+
+	report, err := c.ValidateAdSpec(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	if !report.Valid {
+		return nil, output.Usagef("ad validation failed with %d error(s)", len(report.Errors))
+	}
+
+	var uploadedPhotos []UploadedPhoto
+	if len(spec.Photos) > 0 {
+		var err error
+		uploadedPhotos, err = c.UploadPhotos(ctx, spec.Photos)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	payload := map[string]interface{}{
+		"category_id": spec.CategoryID,
+		"title":       spec.Title,
+		"description": spec.Description,
+		"price":       spec.Price,
+		"negotiable":  spec.Negotiable,
+		"location":    spec.Location,
+	}
+	if spec.ClientRequestID != "" {
+		payload["client_request_id"] = spec.ClientRequestID
+		ctx = WithClientRequestID(ctx, spec.ClientRequestID)
+	}
+	if spec.Contact.AllowChat || spec.Contact.AllowPhone || spec.Contact.Phone != "" || spec.Contact.Email != "" {
+		payload["contact"] = spec.Contact
+	}
+	if spec.Shipping.Allowed || spec.Shipping.WeightKG > 0 {
+		payload["shipping"] = spec.Shipping
+	}
+	if len(spec.Attributes) > 0 {
+		payload["attributes"] = spec.Attributes
+	}
+	if len(uploadedPhotos) > 0 {
+		var mediaIDs []string
+		for _, up := range uploadedPhotos {
+			mediaIDs = append(mediaIDs, up.MediaID)
+		}
+		payload["photos"] = mediaIDs
+		payload["media_ids"] = mediaIDs
+	}
+
+	var created AdItem
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/ads", nil, payload, true, &created); err != nil {
+		var de *output.DomainError
+		if errors.As(err, &de) {
+			if de.Status == http.StatusBadRequest || de.Status == http.StatusUnprocessableEntity {
+				return nil, output.Usagef("ad creation failed (%d): %s", de.Status, de.Msg)
+			}
+			if de.Status == http.StatusNotFound || de.Kind == output.KindNotFound {
+				return nil, output.NotFoundf("category or resource not found: %d", spec.CategoryID)
+			}
+		}
+		return nil, err
+	}
+
+	if created.Title == "" {
+		created.Title = spec.Title
+	}
+	if created.Price == 0 {
+		created.Price = spec.Price
+	}
+	if created.CategoryID == 0 {
+		created.CategoryID = spec.CategoryID
+	}
+	if created.Category == 0 {
+		created.Category = spec.CategoryID
+	}
+	if created.ClientRequestID == "" {
+		created.ClientRequestID = spec.ClientRequestID
+	}
+	if created.Status == "" {
+		created.Status = "published"
+	}
+	if len(created.Photos) == 0 && len(uploadedPhotos) > 0 {
+		created.Photos = uploadedPhotos
+	}
+	if created.URL == "" && created.ID != "" {
+		created.URL = fmt.Sprintf("https://www.milanuncios.com/anuncios/%s.htm", created.ID)
+	}
+
+	return &created, nil
+}
+
+// UpdateAd applies a partial patch (RFC 7396) to an existing ad listing.
+func (c *Client) UpdateAd(ctx context.Context, adID string, patch map[string]interface{}) (*AdUpdateResult, error) {
+	id, err := ExtractAdID(adID)
+	if err != nil {
+		return nil, err
+	}
+	if len(patch) == 0 {
+		return nil, output.Usagef("patch payload cannot be empty")
+	}
+
+	var res AdUpdateResult
+	endpoint := fmt.Sprintf("/api/v1/ads/%s", id)
+	if err := c.doRequest(ctx, http.MethodPatch, endpoint, nil, patch, true, &res); err != nil {
+		var de *output.DomainError
+		if errors.As(err, &de) {
+			if de.Status == http.StatusNotFound || de.Kind == output.KindNotFound {
+				return nil, output.NotFoundf("ad not found: %s", id)
+			}
+			if de.Status == http.StatusBadRequest || de.Status == http.StatusUnprocessableEntity {
+				return nil, output.Usagef("ad update failed (%d): %s", de.Status, de.Msg)
+			}
+		}
+		return nil, err
+	}
+
+	if res.ID == "" {
+		res.ID = id
+	}
+	if len(res.UpdatedFields) == 0 {
+		for k := range patch {
+			res.UpdatedFields = append(res.UpdatedFields, k)
+		}
+		sort.Strings(res.UpdatedFields)
+	}
+	if res.UpdatedAt == "" {
+		res.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	return &res, nil
+}
+
+// DeleteAd withdraws or deletes an ad listing with a structured reason.
+func (c *Client) DeleteAd(ctx context.Context, adID string, reason, feedback string) (*AdDeleteResult, error) {
+	id, err := ExtractAdID(adID)
+	if err != nil {
+		return nil, err
+	}
+
+	validReasons := map[string]bool{
+		"sold_milanuncios": true,
+		"sold_other":       true,
+		"withdrawn":        true,
+		"expired":          true,
+	}
+	cleanReason := strings.ToLower(strings.TrimSpace(reason))
+	if !validReasons[cleanReason] {
+		return nil, output.Usagef("invalid reason %q: must be one of 'sold_milanuncios', 'sold_other', 'withdrawn', 'expired'", reason)
+	}
+
+	payload := map[string]string{
+		"reason": cleanReason,
+	}
+	if feedback != "" {
+		payload["feedback"] = feedback
+	}
+
+	var res AdDeleteResult
+	endpoint := fmt.Sprintf("/api/v1/ads/%s", id)
+	if err := c.doRequest(ctx, http.MethodDelete, endpoint, nil, payload, true, &res); err != nil {
+		var de *output.DomainError
+		if errors.As(err, &de) {
+			if de.Status == http.StatusNotFound || de.Kind == output.KindNotFound {
+				return nil, output.NotFoundf("ad not found: %s", id)
+			}
+			if de.Status == http.StatusBadRequest || de.Status == http.StatusUnprocessableEntity {
+				return nil, output.Usagef("ad delete failed (%d): %s", de.Status, de.Msg)
+			}
+		}
+		return nil, err
+	}
+
+	if res.ID == "" {
+		res.ID = id
+	}
+	if res.Status == "" {
+		res.Status = "deleted"
+	}
+	if res.Reason == "" {
+		res.Reason = cleanReason
+	}
+
+	return &res, nil
+}
+
+func detectImageMime(data []byte, filename string) string {
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return "image/jpeg"
+	}
+	if len(data) >= 8 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G' {
+		return "image/png"
+	}
+	detected := http.DetectContentType(data)
+	if detected == "image/jpeg" || detected == "image/png" || detected == "image/webp" {
+		return detected
+	}
+	if filename != "" {
+		ext := strings.ToLower(filepath.Ext(filename))
+		switch ext {
+		case ".jpg", ".jpeg":
+			return "image/jpeg"
+		case ".png":
+			return "image/png"
+		case ".webp":
+			return "image/webp"
+		}
+	}
+	return detected
+}
+
+func mimeToExt(mimeType string) string {
+	switch mimeType {
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".jpg"
+	}
+}
+
+func extractFilenameFromURL(rawURL, mimeType string) string {
+	u, err := url.Parse(rawURL)
+	if err == nil {
+		base := filepath.Base(u.Path)
+		if base != "." && base != "/" && base != "" {
+			return base
+		}
+	}
+	return "photo" + mimeToExt(mimeType)
 }

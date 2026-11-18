@@ -255,9 +255,9 @@ func TestClientGetAd(t *testing.T) {
 				Name: "Elena",
 				Type: "particular",
 			},
-			Photos: []string{
-				"https://img.milanuncios.com/photos/1.jpg",
-				"https://img.milanuncios.com/photos/2.jpg",
+			Photos: []milanuncios.UploadedPhoto{
+				{Index: 0, URL: "https://img.milanuncios.com/photos/1.jpg"},
+				{Index: 1, URL: "https://img.milanuncios.com/photos/2.jpg"},
 			},
 			URL: "https://www.milanuncios.com/anuncios/492817294.htm",
 		}

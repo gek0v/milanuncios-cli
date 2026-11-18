@@ -428,6 +428,116 @@ class TestAdAndSearchValidation(MilanunciosCLITestCase):
             server.shutdown()
             server.server_close()
 
+    def test_32k_ad_create_unauthenticated_exit_code_3(self):
+        valid_spec = json.dumps({
+            "category_id": 11,
+            "title": "PlayStation 5 con mando dualsense",
+            "description": "Consola en perfecto estado con caja original y cables incluidos sin apenas uso.",
+            "price": 400.0,
+            "location": {"province": "Sevilla"},
+        })
+        res = self.run_cli("ad", "create", "--spec", valid_spec, "--dry-run=false", "--format", "json")
+        self.assertEqual(res.returncode, 3)
+
+    def test_32l_ad_create_published_with_mock_server(self):
+        server = self._start_mock_server()
+        try:
+            self.env["MILANUNCIOS_SESSION_TOKEN"] = "mock-token-123"
+            valid_spec = json.dumps({
+                "category_id": 11,
+                "title": "Volkswagen Golf VII 2.0 TDI Advance",
+                "description": "Vehículo en impecable estado de conservación con libro de mantenimiento.",
+                "price": 13900.0,
+                "location": {
+                    "province": "Madrid",
+                    "municipality": "Alcobendas",
+                },
+                "attributes": {
+                    "fuel": "diesel",
+                },
+                "photos": [
+                    "media://m-991203"
+                ]
+            })
+            res = self.run_cli("ad", "create", "--spec", valid_spec, "--dry-run=false", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            ad = json.loads(res.stdout)
+            self.assertEqual(ad.get("id"), "492817294")
+            self.assertEqual(ad.get("status"), "published")
+            self.assertEqual(ad.get("price"), 13900.0)
+            self.assertIn("volkswagen-golf", ad.get("url", ""))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_32m_ad_update_missing_args_exit_code_2(self):
+        # Missing ad ID
+        res = self.run_cli("ad", "update")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("accepts 1 arg", res.stderr.lower())
+
+        # Missing update fields
+        res2 = self.run_cli("ad", "update", "492817294")
+        self.assertEqual(res2.returncode, 2)
+        self.assertIn("no update fields provided", res2.stderr.lower())
+
+        # Invalid price <= 0
+        res3 = self.run_cli("ad", "update", "492817294", "--price", "-10")
+        self.assertEqual(res3.returncode, 2)
+        self.assertIn("price must be greater than 0", res3.stderr.lower())
+
+        # Invalid JSON spec
+        res4 = self.run_cli("ad", "update", "492817294", "--spec", "invalid-json")
+        self.assertEqual(res4.returncode, 2)
+        self.assertIn("invalid json patch", res4.stderr.lower())
+
+    def test_32n_ad_update_unauthenticated_exit_code_3(self):
+        res = self.run_cli("ad", "update", "492817294", "--price", "12000")
+        self.assertEqual(res.returncode, 3)
+
+    def test_32o_ad_update_with_mock_server_success(self):
+        server = self._start_mock_server()
+        try:
+            self.env["MILANUNCIOS_SESSION_TOKEN"] = "mock-token-123"
+            res = self.run_cli("ad", "update", "492817294", "--price", "13500", "--title", "Golf Actualizado", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertEqual(data.get("id"), "492817294")
+            self.assertEqual(data.get("new_price"), 13500.0)
+            self.assertIn("price", data.get("updated_fields", []))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_32p_ad_delete_missing_args_exit_code_2(self):
+        # Missing ad ID
+        res = self.run_cli("ad", "delete")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("accepts 1 arg", res.stderr.lower())
+
+        # Invalid reason
+        res2 = self.run_cli("ad", "delete", "492817294", "--reason", "invalid_reason")
+        self.assertEqual(res2.returncode, 2)
+        self.assertIn("invalid reason", res2.stderr.lower())
+
+    def test_32q_ad_delete_unauthenticated_exit_code_3(self):
+        res = self.run_cli("ad", "delete", "492817294")
+        self.assertEqual(res.returncode, 3)
+
+    def test_32r_ad_delete_with_mock_server_success(self):
+        server = self._start_mock_server()
+        try:
+            self.env["MILANUNCIOS_SESSION_TOKEN"] = "mock-token-123"
+            res = self.run_cli("ad", "delete", "492817294", "--reason", "sold_milanuncios", "--feedback", "Vendido", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertEqual(data.get("id"), "492817294")
+            self.assertEqual(data.get("status"), "deleted")
+            self.assertEqual(data.get("reason"), "sold_milanuncios")
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def _start_mock_server(self):
         class _MockCategoryHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -452,6 +562,86 @@ class TestAdAndSearchValidation(MilanunciosCLITestCase):
                                 "options": ["manual", "automatico"],
                             },
                         ],
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                if self.path == "/api/v1/media/upload":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "media_id": "media-m-991203",
+                        "url": "https://img.milanuncios.com/fotos/media-m-991203.jpg"
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                elif self.path == "/api/v1/ads":
+                    if not self.headers.get("Authorization"):
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    self.send_response(201)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "id": "492817294",
+                        "client_request_id": body.get("client_request_id"),
+                        "status": "published",
+                        "title": body.get("title"),
+                        "price": body.get("price"),
+                        "category_id": body.get("category_id"),
+                        "url": "https://www.milanuncios.com/coches-de-segunda-mano/volkswagen-golf-492817294.htm",
+                        "created_at": "2026-11-18T08:50:00Z"
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_PATCH(self):
+                if self.path == "/api/v1/ads/492817294":
+                    if not self.headers.get("Authorization"):
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    patch = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "id": "492817294",
+                        "updated_fields": sorted(list(patch.keys())),
+                        "previous_price": 13900.0,
+                        "new_price": patch.get("price", 13500.0),
+                        "updated_at": "2026-11-18T09:15:00Z"
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_DELETE(self):
+                if self.path == "/api/v1/ads/492817294":
+                    if not self.headers.get("Authorization"):
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    payload = json.loads(self.rfile.read(content_len).decode("utf-8")) if content_len > 0 else {}
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "id": "492817294",
+                        "status": "deleted",
+                        "reason": payload.get("reason", "withdrawn"),
+                        "message": "Listing deleted successfully"
                     }
                     self.wfile.write(json.dumps(data).encode("utf-8"))
                 else:
