@@ -371,3 +371,69 @@ func TestMCPSkill(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPFavoriteTagValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	eng := watch.NewEngine(st, client)
+
+	requests := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		// Invalid ad_id string
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"milanuncios_favorite_tag","arguments":{"ad_id":"invalid!@#","tag":"oferta"}}}`,
+		// Valid Milanuncios full URL
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"milanuncios_favorite_tag","arguments":{"ad_id":"https://www.milanuncios.com/motor/coche-492817294.htm","tag":"seguimiento","target_price":9500}}}`,
+	}
+
+	input := strings.Join(requests, "\n") + "\n"
+	var in, out, errOut bytes.Buffer
+	in.WriteString(input)
+
+	srv := mcp.NewServer("0.1.0-test", client, st, eng, &in, &out, &errOut)
+	if err := srv.Run(context.Background()); err != nil {
+		t.Fatalf("mcp server failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	findResp := func(id int) map[string]any {
+		for _, l := range lines {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(l), &m); err == nil {
+				if idVal, ok := m["id"].(float64); ok && int(idVal) == id {
+					return m
+				}
+			}
+		}
+		return nil
+	}
+
+	// Verify id: 2 - should return isError for invalid ad_id
+	resp2 := findResp(2)
+	if resp2 == nil || resp2["result"] == nil {
+		t.Fatalf("expected result envelope for invalid ad_id, got: %+v", resp2)
+	}
+	res2Map, _ := resp2["result"].(map[string]any)
+	if isErr, _ := res2Map["isError"].(bool); !isErr {
+		t.Fatalf("expected isError: true for invalid ad_id, got: %+v", res2Map)
+	}
+	content2 := res2Map["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(content2, "invalid ad ID") {
+		t.Fatalf("expected error mentioning invalid ad ID, got: %s", content2)
+	}
+
+	// Verify id: 3 - should extract 492817294 and succeed
+	resp3 := findResp(3)
+	if resp3 == nil || resp3["result"] == nil {
+		t.Fatalf("expected result for valid URL ad_id, got: %+v", resp3)
+	}
+	text3 := resp3["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text3, "492817294") || !strings.Contains(text3, "seguimiento") {
+		t.Fatalf("expected annotation with extracted ID 492817294, got: %s", text3)
+	}
+}

@@ -52,7 +52,11 @@ func (a *App) getStore() (*store.Store, error) {
 func (a *App) newWatchEngine(st *store.Store) *watch.Engine {
 	eng := watch.NewEngine(st, a.Client)
 	if a.Cfg != nil && len(a.Cfg.Sinks) > 0 {
-		if mgr, err := sink.NewManager(a.Cfg.Sinks); err == nil {
+		var opts []sink.Option
+		if a.Client != nil && a.Client.HTTP != nil && a.Client.HTTP.Transport != nil {
+			opts = append(opts, sink.WithTransport(a.Client.HTTP.Transport))
+		}
+		if mgr, err := sink.NewManager(a.Cfg.Sinks, opts...); err == nil {
 			eng.Sinks = mgr
 		}
 	}
@@ -133,7 +137,7 @@ func (a *App) watchAddFavoritesCmd() *cobra.Command {
 				IntervalSec: sec,
 			}
 
-			if err := st.AddWatch(w); err != nil {
+			if err := st.AddWatch(cmd.Context(), w); err != nil {
 				return fmt.Errorf("saving watch: %w", err)
 			}
 
@@ -200,7 +204,7 @@ func (a *App) watchAddSearchCmd() *cobra.Command {
 				IntervalSec: sec,
 			}
 
-			if err := st.AddWatch(w); err != nil {
+			if err := st.AddWatch(cmd.Context(), w); err != nil {
 				return fmt.Errorf("saving watch: %w", err)
 			}
 
@@ -257,7 +261,7 @@ func (a *App) watchAddAdCmd() *cobra.Command {
 				IntervalSec: sec,
 			}
 
-			if err := st.AddWatch(w); err != nil {
+			if err := st.AddWatch(cmd.Context(), w); err != nil {
 				return fmt.Errorf("saving watch: %w", err)
 			}
 
@@ -283,7 +287,7 @@ func (a *App) watchListCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			list, err := st.ListWatches()
+			list, err := st.ListWatches(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -313,7 +317,7 @@ func (a *App) watchCheckCmd() *cobra.Command {
 			eng := a.newWatchEngine(st)
 
 			if len(args) == 1 {
-				w, err := st.GetWatch(args[0])
+				w, err := st.GetWatch(cmd.Context(), args[0])
 				if err != nil {
 					if err == store.ErrNotFound {
 						return output.NotFoundf("watch %q not found", args[0])
@@ -355,7 +359,7 @@ func (a *App) watchPauseCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			w, err := st.GetWatch(args[0])
+			w, err := st.GetWatch(cmd.Context(), args[0])
 			if err != nil {
 				if err == store.ErrNotFound {
 					return output.NotFoundf("watch %q not found", args[0])
@@ -363,7 +367,7 @@ func (a *App) watchPauseCmd() *cobra.Command {
 				return err
 			}
 
-			if err := st.UpdateWatchStatus(w.ID, "paused"); err != nil {
+			if err := st.UpdateWatchStatus(cmd.Context(), w.ID, "paused"); err != nil {
 				return err
 			}
 
@@ -388,7 +392,7 @@ func (a *App) watchResumeCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			w, err := st.GetWatch(args[0])
+			w, err := st.GetWatch(cmd.Context(), args[0])
 			if err != nil {
 				if err == store.ErrNotFound {
 					return output.NotFoundf("watch %q not found", args[0])
@@ -396,7 +400,7 @@ func (a *App) watchResumeCmd() *cobra.Command {
 				return err
 			}
 
-			if err := st.UpdateWatchStatus(w.ID, "active"); err != nil {
+			if err := st.UpdateWatchStatus(cmd.Context(), w.ID, "active"); err != nil {
 				return err
 			}
 
@@ -422,7 +426,7 @@ func (a *App) watchRemoveCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			if err := st.DeleteWatch(args[0]); err != nil {
+			if err := st.DeleteWatch(cmd.Context(), args[0]); err != nil {
 				if err == store.ErrNotFound {
 					return output.NotFoundf("watch %q not found", args[0])
 				}
@@ -454,7 +458,7 @@ func (a *App) watchEventsCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			events, err := st.ListEvents(watchID, limit)
+			events, err := st.ListEvents(cmd.Context(), watchID, limit)
 			if err != nil {
 				return err
 			}
@@ -491,14 +495,28 @@ func (a *App) watchRunCmd() *cobra.Command {
 			}
 			defer st.Close()
 
+			tickSec := sec
+			if !cmd.Flags().Changed("interval") {
+				if watches, err := st.ListWatches(cmd.Context()); err == nil {
+					for _, w := range watches {
+						if w.Status == "active" && w.IntervalSec > 0 && w.IntervalSec < tickSec {
+							tickSec = w.IntervalSec
+						}
+					}
+				}
+				if tickSec < 10 {
+					tickSec = 10
+				}
+			}
+
 			eng := a.newWatchEngine(st)
-			ticker := time.NewTicker(time.Duration(sec) * time.Second)
+			ticker := time.NewTicker(time.Duration(tickSec) * time.Second)
 			defer ticker.Stop()
 
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			fmt.Fprintf(a.Stderr, "milanuncios-cli watch engine running (interval: %ds). Press Ctrl+C to stop.\n", sec)
+			fmt.Fprintf(a.Stderr, "milanuncios-cli watch engine running (interval: %ds). Press Ctrl+C to stop.\n", tickSec)
 
 			// Initial check on start
 			if results, err := eng.CheckAll(ctx); err == nil {
@@ -520,6 +538,9 @@ func (a *App) watchRunCmd() *cobra.Command {
 				case <-ticker.C:
 					results, err := eng.CheckAll(ctx)
 					if err != nil {
+						if ctx.Err() != nil {
+							break
+						}
 						fmt.Fprintf(a.Stderr, "watch check error: %v\n", err)
 						continue
 					}

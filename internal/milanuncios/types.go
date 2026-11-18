@@ -112,7 +112,7 @@ func (a *AdItem) Pretty(w io.Writer, color bool) {
 		if a.ClientRequestID != "" {
 			fmt.Fprintf(w, "Client Request ID: %s\n", a.ClientRequestID)
 		}
-		fmt.Fprintf(w, "Title: %s  (%s)\n", a.Title, priceStr)
+		fmt.Fprintf(w, "Title: %s  (%s)\n", output.StripANSI(a.Title), priceStr)
 		if a.URL != "" {
 			fmt.Fprintf(w, "URL: %s\n", a.URL)
 		}
@@ -150,10 +150,11 @@ func (a *AdItem) Pretty(w io.Writer, color bool) {
 		return
 	}
 
+	cleanTitle := output.StripANSI(a.Title)
 	if color {
-		fmt.Fprintf(w, "\x1b[1m%s\x1b[0m  (%s)\n", a.Title, priceStr)
+		fmt.Fprintf(w, "\x1b[1m%s\x1b[0m  (%s)\n", cleanTitle, priceStr)
 	} else {
-		fmt.Fprintf(w, "%s  (%s)\n", a.Title, priceStr)
+		fmt.Fprintf(w, "%s  (%s)\n", cleanTitle, priceStr)
 	}
 	fmt.Fprintf(w, "ID: %s  |  URL: %s\n", a.ID, a.URL)
 
@@ -172,7 +173,7 @@ func (a *AdItem) Pretty(w io.Writer, color bool) {
 		if sellerType != "" {
 			sellerType = " [" + sellerType + "]"
 		}
-		fmt.Fprintf(w, "Vendedor: %s%s\n", a.Seller.Name, sellerType)
+		fmt.Fprintf(w, "Vendedor: %s%s\n", output.StripANSI(a.Seller.Name), sellerType)
 	}
 	if a.PublishedAt != "" {
 		fmt.Fprintf(w, "Publicado: %s\n", a.PublishedAt)
@@ -190,7 +191,7 @@ func (a *AdItem) Pretty(w io.Writer, color bool) {
 	}
 
 	if a.Description != "" {
-		fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(a.Description))
+		fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(output.StripANSI(a.Description)))
 	}
 }
 
@@ -402,10 +403,10 @@ func (r *SearchResult) Pretty(w io.Writer, color bool) {
 
 		rows = append(rows, []string{
 			it.ID,
-			output.Truncate(it.Title, 40),
+			output.Truncate(output.StripANSI(it.Title), 40),
 			priceStr,
 			output.Truncate(loc, 24),
-			output.Truncate(sellerStr, 20),
+			output.Truncate(output.StripANSI(sellerStr), 20),
 		})
 	}
 
@@ -493,10 +494,10 @@ func (cl ConversationList) Pretty(w io.Writer, color bool) {
 
 		rows = append(rows, []string{
 			c.ID,
-			output.Truncate(c.UserName, 20),
-			output.Truncate(c.AdTitle, 26),
+			output.Truncate(output.StripANSI(c.UserName), 20),
+			output.Truncate(output.StripANSI(c.AdTitle), 26),
 			priceStr,
-			output.Truncate(c.LastMessage, 30),
+			output.Truncate(output.StripANSI(c.LastMessage), 30),
 			unreadStr,
 		})
 	}
@@ -524,12 +525,13 @@ type ConversationDetails struct {
 // Pretty prints the full conversation history.
 func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
 	c := cd.Conversation
+	cleanUser := output.StripANSI(c.UserName)
 	if color {
-		fmt.Fprintf(w, "\x1b[1mConversación #%s con %s\x1b[0m\n", c.ID, c.UserName)
+		fmt.Fprintf(w, "\x1b[1mConversación #%s con %s\x1b[0m\n", c.ID, cleanUser)
 	} else {
-		fmt.Fprintf(w, "Conversación #%s con %s\n", c.ID, c.UserName)
+		fmt.Fprintf(w, "Conversación #%s con %s\n", c.ID, cleanUser)
 	}
-	fmt.Fprintf(w, "Anuncio: %s (%.0f €) [ID: %s]\n\n", c.AdTitle, c.AdPrice, c.AdID)
+	fmt.Fprintf(w, "Anuncio: %s (%.0f €) [ID: %s]\n\n", output.StripANSI(c.AdTitle), c.AdPrice, c.AdID)
 
 	if len(cd.Messages) == 0 {
 		fmt.Fprintln(w, "No messages in this conversation yet.")
@@ -537,19 +539,20 @@ func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
 	}
 
 	for _, m := range cd.Messages {
-		sender := m.SenderName
+		sender := output.StripANSI(m.SenderName)
 		if m.FromMe {
 			sender = "Tú"
 		}
+		text := output.StripANSI(m.Text)
 
 		if color {
 			if m.FromMe {
-				fmt.Fprintf(w, "\x1b[34m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, m.Text)
+				fmt.Fprintf(w, "\x1b[34m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, text)
 			} else {
-				fmt.Fprintf(w, "\x1b[32m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, m.Text)
+				fmt.Fprintf(w, "\x1b[32m[%s] %s:\x1b[0m %s\n", m.SentAt, sender, text)
 			}
 		} else {
-			fmt.Fprintf(w, "[%s] %s: %s\n", m.SentAt, sender, m.Text)
+			fmt.Fprintf(w, "[%s] %s: %s\n", m.SentAt, sender, text)
 		}
 	}
 }
@@ -566,13 +569,15 @@ type ChatMessageReceivedEvent struct {
 
 // Pretty renders the chat event for human terminals.
 func (e ChatMessageReceivedEvent) Pretty(w io.Writer, color bool) {
+	cleanSender := output.StripANSI(e.SenderName)
+	cleanText := output.StripANSI(e.Text)
 	if color {
-		fmt.Fprintf(w, "\x1b[1;32m[MENSAJE ENTRANTE]\x1b[0m \x1b[1m%s\x1b[0m en conversación %s (anuncio %s)\n", e.SenderName, e.ConversationID, e.AdID)
+		fmt.Fprintf(w, "\x1b[1;32m[MENSAJE ENTRANTE]\x1b[0m \x1b[1m%s\x1b[0m en conversación %s (anuncio %s)\n", cleanSender, e.ConversationID, e.AdID)
 	} else {
-		fmt.Fprintf(w, "[MENSAJE ENTRANTE] %s en conversación %s (anuncio %s)\n", e.SenderName, e.ConversationID, e.AdID)
+		fmt.Fprintf(w, "[MENSAJE ENTRANTE] %s en conversación %s (anuncio %s)\n", cleanSender, e.ConversationID, e.AdID)
 	}
 	fmt.Fprintf(w, "Fecha: %s\n", e.SentAt)
-	fmt.Fprintf(w, "Texto: %s\n\n", e.Text)
+	fmt.Fprintf(w, "Texto: %s\n\n", cleanText)
 }
 
 // ConversationStartResult represents the response when initiating contact on an ad.

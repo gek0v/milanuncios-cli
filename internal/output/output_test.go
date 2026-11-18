@@ -191,3 +191,24 @@ func TestTableAndTruncate(t *testing.T) {
 		t.Fatalf("expected truncated string length <= 8, got %q", truncated)
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Clean string", "Clean string"},
+		{"\x1b[31mRed text\x1b[0m", "Red text"},
+		{"\x1b[1;32mBold Green\x1b[0m normal", "Bold Green normal"},
+		{"\x1b]0;Evil Title\x07Malicious", "Malicious"},
+		{"Trailing escape \x1b", "Trailing escape "},
+		{"Title with \x1b[2Jclear screen code", "Title with clear screen code"},
+	}
+
+	for _, tt := range tests {
+		got := output.StripANSI(tt.input)
+		if got != tt.expected {
+			t.Errorf("StripANSI(%q) = %q; expected %q", tt.input, got, tt.expected)
+		}
+	}
+}

@@ -186,7 +186,7 @@ func (a *App) chatWatchCmd() *cobra.Command {
 			}
 			defer st.Close()
 
-			chatWatch, err := st.EnsureChatWatch()
+			chatWatch, err := st.EnsureChatWatch(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("initializing chat watch record: %w", err)
 			}
@@ -202,12 +202,18 @@ func (a *App) chatWatchCmd() *cobra.Command {
 				now := time.Now().UTC()
 
 				for _, c := range convs {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
 					if unreadOnly && !c.Unread {
 						continue
 					}
 
 					details, err := a.Client.GetConversation(ctx, c.ID)
 					if err != nil {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
 						if !once {
 							fmt.Fprintf(a.Stderr, "failed to get conversation %s: %v\n", c.ID, err)
 						}
@@ -215,11 +221,14 @@ func (a *App) chatWatchCmd() *cobra.Command {
 					}
 
 					for _, msg := range details.Messages {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
 						if msg.FromMe {
 							continue
 						}
 
-						seen, err := st.HasSeenChatMessage(chatWatch.ID, msg.ID)
+						seen, err := st.HasSeenChatMessage(ctx, chatWatch.ID, msg.ID)
 						if err != nil {
 							return fmt.Errorf("checking seen status for message %s: %w", msg.ID, err)
 						}
@@ -228,7 +237,7 @@ func (a *App) chatWatchCmd() *cobra.Command {
 						}
 
 						// Mark as seen
-						if err := st.MarkChatMessageSeen(chatWatch.ID, msg.ID, msg.Text); err != nil {
+						if err := st.MarkChatMessageSeen(ctx, chatWatch.ID, msg.ID, msg.Text); err != nil {
 							return fmt.Errorf("marking message %s as seen: %w", msg.ID, err)
 						}
 
@@ -249,7 +258,7 @@ func (a *App) chatWatchCmd() *cobra.Command {
 							PayloadJSON: store.EncodeJSON(evPayload),
 							CreatedAt:   now,
 						}
-						if err := st.RecordEvent(&storeEv); err != nil {
+						if err := st.RecordEvent(ctx, &storeEv); err != nil {
 							return fmt.Errorf("recording chat event: %w", err)
 						}
 
@@ -257,7 +266,7 @@ func (a *App) chatWatchCmd() *cobra.Command {
 						if eng.Sinks != nil {
 							errs := eng.Sinks.Dispatch(ctx, storeEv)
 							if len(errs) == 0 {
-								_ = st.MarkEventsDelivered([]int64{storeEv.ID})
+								_ = st.MarkEventsDelivered(ctx, []int64{storeEv.ID})
 							}
 						}
 
@@ -298,6 +307,9 @@ func (a *App) chatWatchCmd() *cobra.Command {
 					}
 				case <-ticker.C:
 					if err := checkCycle(ctx); err != nil {
+						if ctx.Err() != nil {
+							break
+						}
 						fmt.Fprintf(a.Stderr, "chat check error: %v\n", err)
 					}
 				}

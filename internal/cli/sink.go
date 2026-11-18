@@ -61,7 +61,12 @@ func (a *App) sinkTestCmd() *cobra.Command {
 				return output.NotFoundf("sink %q not found in config", name)
 			}
 
-			s, err := sink.FromConfig(name, sc)
+			var opts []sink.Option
+			if a.Client != nil && a.Client.HTTP != nil && a.Client.HTTP.Transport != nil {
+				opts = append(opts, sink.WithTransport(a.Client.HTTP.Transport))
+			}
+
+			s, err := sink.FromConfig(name, sc, opts...)
 			if err != nil {
 				return err
 			}
