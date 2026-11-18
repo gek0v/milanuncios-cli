@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -160,29 +161,32 @@ type Store struct {
 
 // Open initializes SQLite connection and runs migrations.
 func Open(dbPath string) (*Store, error) {
-	if dbPath != ":memory:" {
+	var dsn string
+	if dbPath == ":memory:" {
+		dsn = ":memory:?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	} else {
+		cleanPath := filepath.ToSlash(dbPath)
+		if strings.HasPrefix(cleanPath, "file:") {
+			cleanPath = strings.TrimPrefix(cleanPath, "file:")
+		}
 		dir := filepath.Dir(dbPath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("creating db directory: %w", err)
 		}
+		if strings.Contains(cleanPath, "?") {
+			dsn = fmt.Sprintf("file:%s&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)", cleanPath)
+		} else {
+			dsn = fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)", cleanPath)
+		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite db: %w", err)
 	}
 
 	// Single writer to prevent locking errors in modernc sqlite
 	db.SetMaxOpenConns(1)
-
-	pragmas := "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;"
-	if dbPath != ":memory:" {
-		pragmas += " PRAGMA journal_mode = WAL;"
-	}
-	if _, err := db.Exec(pragmas); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("setting sqlite pragmas: %w", err)
-	}
 
 	s := &Store{
 		dbPath: dbPath,
@@ -258,12 +262,24 @@ func (s *Store) migrate() error {
 		updated_at TEXT NOT NULL
 	);
 
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_watches_name ON watches(name);
 	CREATE INDEX IF NOT EXISTS idx_seen_items_watch ON seen_items(watch_id);
+	CREATE INDEX IF NOT EXISTS idx_seen_items_last_seen ON seen_items(last_seen_at);
 	CREATE INDEX IF NOT EXISTS idx_events_watch ON events(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered);
 	CREATE INDEX IF NOT EXISTS idx_fav_annotations_tag ON favorite_annotations(tag);
 	`
-	_, err := s.db.Exec(schema)
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		_, err = s.db.Exec(schema)
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(err.Error(), "locked") && !strings.Contains(err.Error(), "busy") {
+			return err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 	return err
 }
 
@@ -436,11 +452,12 @@ func (s *Store) getWatchLocked(idOrName string) (*Watch, error) {
 }
 
 // GetSeenItems returns map of ad_id -> SeenItem for a given watch.
+// Omits raw_json to conserve memory during diffing cycles.
 func (s *Store) GetSeenItems(watchID int64) (map[string]SeenItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rows, err := s.db.Query(`SELECT watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title, raw_json FROM seen_items WHERE watch_id = ?`, watchID)
+	rows, err := s.db.Query(`SELECT watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title FROM seen_items WHERE watch_id = ?`, watchID)
 	if err != nil {
 		return nil, err
 	}
@@ -451,7 +468,7 @@ func (s *Store) GetSeenItems(watchID int64) (map[string]SeenItem, error) {
 		var it SeenItem
 		var firstStr, lastStr string
 
-		if err := rows.Scan(&it.WatchID, &it.AdID, &firstStr, &lastStr, &it.LastPrice, &it.LastTitle, &it.RawJSON); err != nil {
+		if err := rows.Scan(&it.WatchID, &it.AdID, &firstStr, &lastStr, &it.LastPrice, &it.LastTitle); err != nil {
 			return nil, err
 		}
 
@@ -466,6 +483,53 @@ func (s *Store) GetSeenItems(watchID int64) (map[string]SeenItem, error) {
 	}
 
 	return res, rows.Err()
+}
+
+// GetSeenItem retrieves a single seen ad with its full raw_json.
+func (s *Store) GetSeenItem(watchID int64, adID string) (*SeenItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var it SeenItem
+	var firstStr, lastStr string
+	query := `SELECT watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title, raw_json FROM seen_items WHERE watch_id = ? AND ad_id = ? LIMIT 1`
+	err := s.db.QueryRow(query, watchID, adID).Scan(&it.WatchID, &it.AdID, &firstStr, &lastStr, &it.LastPrice, &it.LastTitle, &it.RawJSON)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if t, err := time.Parse(time.RFC3339, firstStr); err == nil {
+		it.FirstSeenAt = t
+	}
+	if t, err := time.Parse(time.RFC3339, lastStr); err == nil {
+		it.LastSeenAt = t
+	}
+
+	return &it, nil
+}
+
+// DefaultSeenItemsTTL is the default retention period for seen ads (30 days).
+const DefaultSeenItemsTTL = 30 * 24 * time.Hour
+
+// PruneSeenItems removes seen items not seen since the given duration (e.g. 30 days).
+// If olderThan <= 0, DefaultSeenItemsTTL (30 days) is used.
+// Returns the number of pruned items.
+func (s *Store) PruneSeenItems(olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = DefaultSeenItemsTTL
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339)
+	res, err := s.db.Exec(`DELETE FROM seen_items WHERE last_seen_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // UpsertSeenItem records or updates a seen ad.
@@ -597,6 +661,131 @@ func (s *Store) DeleteSeenItem(watchID int64, adID string) error {
 	return err
 }
 
+// Tx represents an active database transaction in Store.
+type Tx struct {
+	tx     *sql.Tx
+	st     *Store
+	closed bool
+	mu     sync.Mutex
+}
+
+// BeginTx starts a database transaction wrapped in Store Tx.
+func (s *Store) BeginTx(ctx context.Context) (*Tx, error) {
+	s.mu.Lock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	return &Tx{
+		tx: tx,
+		st: s,
+	}, nil
+}
+
+// Commit commits the transaction and releases the store lock.
+func (t *Tx) Commit() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	defer t.st.mu.Unlock()
+	return t.tx.Commit()
+}
+
+// Rollback aborts the transaction and releases the store lock.
+func (t *Tx) Rollback() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	defer t.st.mu.Unlock()
+	return t.tx.Rollback()
+}
+
+// UpsertSeenItem records or updates a seen ad inside the transaction.
+func (t *Tx) UpsertSeenItem(it *SeenItem) error {
+	query := `
+	INSERT INTO seen_items (watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title, raw_json)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(watch_id, ad_id) DO UPDATE SET
+		last_seen_at = excluded.last_seen_at,
+		last_price = excluded.last_price,
+		last_title = excluded.last_title,
+		raw_json = excluded.raw_json
+	`
+	_, err := t.tx.Exec(query,
+		it.WatchID,
+		it.AdID,
+		it.FirstSeenAt.UTC().Format(time.RFC3339),
+		it.LastSeenAt.UTC().Format(time.RFC3339),
+		it.LastPrice,
+		it.LastTitle,
+		it.RawJSON,
+	)
+	return err
+}
+
+// RecordEvent saves a detected event inside the transaction.
+func (t *Tx) RecordEvent(ev *Event) error {
+	now := time.Now().UTC()
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = now
+	}
+
+	delivInt := 0
+	if ev.Delivered {
+		delivInt = 1
+	}
+
+	query := `
+	INSERT INTO events (watch_id, event_type, ad_id, payload_json, created_at, delivered)
+	VALUES (?, ?, ?, ?, ?, ?)
+	`
+	res, err := t.tx.Exec(query, ev.WatchID, ev.EventType, ev.AdID, ev.PayloadJSON, ev.CreatedAt.Format(time.RFC3339), delivInt)
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	ev.ID = id
+	return nil
+}
+
+// DeleteSeenItem removes a seen ad inside the transaction.
+func (t *Tx) DeleteSeenItem(watchID int64, adID string) error {
+	_, err := t.tx.Exec(`DELETE FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, adID)
+	return err
+}
+
+// UpdateWatchChecked records the timestamp of a completed watch check inside the transaction.
+func (t *Tx) UpdateWatchChecked(id int64, at time.Time) error {
+	_, err := t.tx.Exec(`UPDATE watches SET last_checked_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
+	return err
+}
+
+// UpdateWatchStatus sets status ("active", "paused") for a watch inside the transaction.
+func (t *Tx) UpdateWatchStatus(id int64, status string) error {
+	res, err := t.tx.Exec(`UPDATE watches SET status = ? WHERE id = ?`, status, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SaveAnnotation stores or updates agent notes and metadata for an ad.
 func (s *Store) SaveAnnotation(adID, tag, note string, targetPrice float64) error {
 	s.mu.Lock()
@@ -638,58 +827,42 @@ func (s *Store) GetAnnotation(adID string) (*FavoriteAnnotation, error) {
 	return &fa, nil
 }
 
-// EnsureChatWatch returns the existing chat watch or creates one if it doesn't exist.
+// EnsureChatWatch returns the existing chat watch or creates one atomically if it doesn't exist.
 func (s *Store) EnsureChatWatch() (*Watch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO watches (type, name, target, query_json, interval_sec, created_at, status)
+		VALUES ('chat', 'chat_monitor', 'conversations', '{}', 30, ?, 'active')
+		ON CONFLICT(name) DO NOTHING
+	`, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, fmt.Errorf("ensuring chat watch: %w", err)
+	}
 
 	var w Watch
 	var lastCheckedStr sql.NullString
 	var createdStr string
 
-	err := s.db.QueryRow(`
+	err = s.db.QueryRow(`
 		SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status
-		FROM watches WHERE type = 'chat' LIMIT 1
+		FROM watches WHERE name = 'chat_monitor' LIMIT 1
 	`).Scan(&w.ID, &w.Type, &w.Name, &w.Target, &w.QueryJSON, &w.IntervalSec, &lastCheckedStr, &createdStr, &w.Status)
-
-	if err == nil {
-		if lastCheckedStr.Valid && lastCheckedStr.String != "" {
-			if t, err := time.Parse(time.RFC3339, lastCheckedStr.String); err == nil {
-				w.LastCheckedAt = &t
-			}
-		}
-		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
-			w.CreatedAt = t
-		}
-		return &w, nil
-	}
-
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-
-	now := time.Now().UTC()
-	res, err := s.db.Exec(`
-		INSERT INTO watches (type, name, target, query_json, interval_sec, created_at, status)
-		VALUES ('chat', 'chat_monitor', 'conversations', '{}', 30, ?, 'active')
-	`, now.Format(time.RFC3339))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching chat watch: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
+
+	if lastCheckedStr.Valid && lastCheckedStr.String != "" {
+		if t, err := time.Parse(time.RFC3339, lastCheckedStr.String); err == nil {
+			w.LastCheckedAt = &t
+		}
 	}
-	return &Watch{
-		ID:          id,
-		Type:        "chat",
-		Name:        "chat_monitor",
-		Target:      "conversations",
-		QueryJSON:   "{}",
-		IntervalSec: 30,
-		CreatedAt:   now,
-		Status:      "active",
-	}, nil
+	if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+		w.CreatedAt = t
+	}
+	return &w, nil
 }
 
 // HasSeenChatMessage returns true if a message ID has already been recorded for this chat watch.

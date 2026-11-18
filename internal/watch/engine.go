@@ -19,10 +19,11 @@ type SinkSender interface {
 
 // Engine orchestrates periodic checks, diffing, and event generation for watches.
 type Engine struct {
-	Store  *store.Store
-	Client *milanuncios.Client
-	Sinks  SinkSender
-	Notice func(string)
+	Store        *store.Store
+	Client       *milanuncios.Client
+	Sinks        SinkSender
+	Notice       func(string)
+	SeenItemsTTL time.Duration
 }
 
 // NewEngine creates an initialized watch Engine.
@@ -52,6 +53,11 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 		WatchID:   w.ID,
 		WatchName: w.Name,
 		WatchType: w.Type,
+	}
+
+	// Automatic retention pruning to prevent unbounded growth / OOM
+	if _, err := e.Store.PruneSeenItems(e.SeenItemsTTL); err != nil && e.Notice != nil {
+		e.Notice(fmt.Sprintf("pruning seen items: %v", err))
 	}
 
 	switch w.Type {
@@ -123,7 +129,17 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 	var generatedEvents []store.Event
 	now := time.Now().UTC()
 
+	tx, err := e.Store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting diff transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	for _, item := range searchRes.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		seen, exists := seenMap[item.ID]
 
 		if !exists {
@@ -137,7 +153,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 				LastTitle:   item.Title,
 				RawJSON:     store.EncodeJSON(item),
 			}
-			if err := e.Store.UpsertSeenItem(seenItem); err != nil {
+			if err := tx.UpsertSeenItem(seenItem); err != nil {
 				return nil, err
 			}
 			seenMap[item.ID] = *seenItem
@@ -156,7 +172,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 					}),
 					CreatedAt: now,
 				}
-				if err := e.Store.RecordEvent(&ev); err != nil {
+				if err := tx.RecordEvent(&ev); err != nil {
 					return nil, err
 				}
 				generatedEvents = append(generatedEvents, ev)
@@ -181,7 +197,7 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 					}),
 					CreatedAt: now,
 				}
-				if err := e.Store.RecordEvent(&ev); err != nil {
+				if err := tx.RecordEvent(&ev); err != nil {
 					return nil, err
 				}
 				generatedEvents = append(generatedEvents, ev)
@@ -193,8 +209,14 @@ func (e *Engine) checkSearchWatch(ctx context.Context, w *store.Watch, res *Chec
 			seen.LastPrice = item.Price
 			seen.LastTitle = item.Title
 			seen.RawJSON = store.EncodeJSON(item)
-			_ = e.Store.UpsertSeenItem(&seen)
+			if err := tx.UpsertSeenItem(&seen); err != nil {
+				return nil, err
+			}
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing diff transaction: %w", err)
 	}
 
 	return generatedEvents, nil
@@ -206,7 +228,13 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-			_ = e.Store.UpdateWatchStatus(w.ID, "paused")
+			tx, tErr := e.Store.BeginTx(ctx)
+			if tErr != nil {
+				return nil, tErr
+			}
+			defer tx.Rollback()
+
+			_ = tx.UpdateWatchStatus(w.ID, "paused")
 			ev := store.Event{
 				WatchID:   w.ID,
 				EventType: "ad.removed",
@@ -220,11 +248,14 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 				}),
 				CreatedAt: now,
 			}
-			if rErr := e.Store.RecordEvent(&ev); rErr == nil {
-				res.Removed++
-				return []store.Event{ev}, nil
+			if rErr := tx.RecordEvent(&ev); rErr != nil {
+				return nil, rErr
 			}
-			return nil, err
+			if cErr := tx.Commit(); cErr != nil {
+				return nil, cErr
+			}
+			res.Removed++
+			return []store.Event{ev}, nil
 		}
 		return nil, err
 	}
@@ -237,6 +268,12 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 	seen, exists := seenMap[ad.ID]
 	var generated []store.Event
 
+	tx, err := e.Store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting diff transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	if !exists {
 		seenItem := &store.SeenItem{
 			WatchID:     w.ID,
@@ -247,7 +284,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 			LastTitle:   ad.Title,
 			RawJSON:     store.EncodeJSON(ad),
 		}
-		if err := e.Store.UpsertSeenItem(seenItem); err != nil {
+		if err := tx.UpsertSeenItem(seenItem); err != nil {
 			return nil, err
 		}
 	} else {
@@ -268,7 +305,7 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 				}),
 				CreatedAt: now,
 			}
-			if err := e.Store.RecordEvent(&ev); err != nil {
+			if err := tx.RecordEvent(&ev); err != nil {
 				return nil, err
 			}
 			generated = append(generated, ev)
@@ -279,7 +316,13 @@ func (e *Engine) checkAdWatch(ctx context.Context, w *store.Watch, res *CheckRes
 		seen.LastPrice = ad.Price
 		seen.LastTitle = ad.Title
 		seen.RawJSON = store.EncodeJSON(ad)
-		_ = e.Store.UpsertSeenItem(&seen)
+		if err := tx.UpsertSeenItem(&seen); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing diff transaction: %w", err)
 	}
 
 	return generated, nil
@@ -308,7 +351,17 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 	now := time.Now().UTC()
 	currentIDs := make(map[string]bool)
 
+	tx, err := e.Store.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting diff transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	for _, item := range favs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		currentIDs[item.ID] = true
 		seen, exists := seenMap[item.ID]
 
@@ -323,7 +376,7 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 				LastTitle:   item.Title,
 				RawJSON:     store.EncodeJSON(item),
 			}
-			if err := e.Store.UpsertSeenItem(seenItem); err != nil {
+			if err := tx.UpsertSeenItem(seenItem); err != nil {
 				return nil, err
 			}
 			seenMap[item.ID] = *seenItem
@@ -349,7 +402,7 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 					}),
 					CreatedAt: now,
 				}
-				if err := e.Store.RecordEvent(&ev); err != nil {
+				if err := tx.RecordEvent(&ev); err != nil {
 					return nil, err
 				}
 				generatedEvents = append(generatedEvents, ev)
@@ -361,7 +414,9 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 			seen.LastPrice = item.Price
 			seen.LastTitle = item.Title
 			seen.RawJSON = store.EncodeJSON(item)
-			_ = e.Store.UpsertSeenItem(&seen)
+			if err := tx.UpsertSeenItem(&seen); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -383,15 +438,21 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 				}),
 				CreatedAt: now,
 			}
-			if err := e.Store.RecordEvent(&ev); err != nil {
+			if err := tx.RecordEvent(&ev); err != nil {
 				return nil, err
 			}
 			generatedEvents = append(generatedEvents, ev)
 			res.Removed++
 
 			// Remove from seen items so it won't fire ad.removed in subsequent runs
-			_ = e.Store.DeleteSeenItem(w.ID, seenAdID)
+			if err := tx.DeleteSeenItem(w.ID, seenAdID); err != nil {
+				return nil, err
+			}
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing diff transaction: %w", err)
 	}
 
 	return generatedEvents, nil

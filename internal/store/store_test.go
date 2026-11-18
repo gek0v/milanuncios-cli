@@ -2,14 +2,377 @@ package store_test
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/store"
 )
+
+func TestModerncPragmaDSN(t *testing.T) {
+	// test :memory:
+	sMem, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer sMem.Close()
+
+	// test file on disk
+	tmpDir := t.TempDir()
+	dbFile := filepath.Join(tmpDir, "test_pragma.db")
+	sFile, err := store.Open(dbFile)
+	if err != nil {
+		t.Fatalf("open file store: %v", err)
+	}
+	defer sFile.Close()
+
+	// Open raw connection to verify PRAGMA persistence
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)", filepath.ToSlash(dbFile))
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer db.Close()
+
+	var bt, fk int
+	var jm string
+	if err := db.QueryRow("PRAGMA busy_timeout;").Scan(&bt); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if err := db.QueryRow("PRAGMA foreign_keys;").Scan(&fk); err != nil {
+		t.Fatalf("query foreign_keys: %v", err)
+	}
+	if err := db.QueryRow("PRAGMA journal_mode;").Scan(&jm); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+
+	if bt != 5000 {
+		t.Errorf("expected busy_timeout 5000, got %d", bt)
+	}
+	if fk != 1 {
+		t.Errorf("expected foreign_keys 1, got %d", fk)
+	}
+	if strings.ToLower(jm) != "wal" {
+		t.Errorf("expected journal_mode wal, got %s", jm)
+	}
+}
+
+func TestStoreForeignKeyCascade(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "cascade.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	w := &store.Watch{
+		Type:        "search",
+		Name:        "cascade-watch",
+		Target:      "test target",
+		IntervalSec: 300,
+	}
+	if err := s.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	now := time.Now().UTC()
+	seen := &store.SeenItem{
+		WatchID:     w.ID,
+		AdID:        "ad-cascade",
+		FirstSeenAt: now,
+		LastSeenAt:  now,
+		LastPrice:   100,
+		LastTitle:   "Item title",
+		RawJSON:     `{"id":"ad-cascade"}`,
+	}
+	if err := s.UpsertSeenItem(seen); err != nil {
+		t.Fatalf("upsert seen item: %v", err)
+	}
+
+	// Delete the watch
+	if err := s.DeleteWatch("cascade-watch"); err != nil {
+		t.Fatalf("delete watch: %v", err)
+	}
+
+	// Verify seen item is gone
+	items, err := s.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 seen items due to foreign key cascade, got %d", len(items))
+	}
+}
+
+func TestStoreConcurrencyReadsWrites(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "concurrent.db")
+
+	const numGoroutines = 15
+	var wg sync.WaitGroup
+
+	errCh := make(chan error, numGoroutines*2)
+
+	// Multiple separate Store instances opening the exact same SQLite file
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			st, err := store.Open(dbPath)
+			if err != nil {
+				errCh <- fmt.Errorf("worker %d open: %w", workerID, err)
+				return
+			}
+			defer st.Close()
+
+			watchName := fmt.Sprintf("worker-watch-%d", workerID)
+			w := &store.Watch{
+				Type:        "search",
+				Name:        watchName,
+				Target:      "query",
+				IntervalSec: 60,
+			}
+			if err := st.AddWatch(w); err != nil {
+				errCh <- fmt.Errorf("worker %d add watch: %w", workerID, err)
+				return
+			}
+
+			now := time.Now().UTC()
+			for j := 0; j < 5; j++ {
+				adID := fmt.Sprintf("ad-%d-%d", workerID, j)
+				item := &store.SeenItem{
+					WatchID:     w.ID,
+					AdID:        adID,
+					FirstSeenAt: now,
+					LastSeenAt:  now,
+					LastPrice:   float64(100 + j*10),
+					LastTitle:   fmt.Sprintf("Item %d-%d", workerID, j),
+					RawJSON:     `{"test":true}`,
+				}
+				if err := st.UpsertSeenItem(item); err != nil {
+					errCh <- fmt.Errorf("worker %d upsert seen: %w", workerID, err)
+					return
+				}
+
+				ev := &store.Event{
+					WatchID:     w.ID,
+					EventType:   "ad.new",
+					AdID:        adID,
+					PayloadJSON: `{"status":"new"}`,
+					CreatedAt:   now,
+				}
+				if err := st.RecordEvent(ev); err != nil {
+					errCh <- fmt.Errorf("worker %d record event: %w", workerID, err)
+					return
+				}
+
+				// Concurrent read
+				seen, err := st.GetSeenItems(w.ID)
+				if err != nil {
+					errCh <- fmt.Errorf("worker %d get seen: %w", workerID, err)
+					return
+				}
+				if len(seen) == 0 {
+					errCh <- fmt.Errorf("worker %d expected seen items, got 0", workerID)
+					return
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureChatWatchConcurrencyAndUniqueness(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "chat_watch_concurrent.db")
+
+	// Initialize store schema once before concurrent workers start
+	initStore, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	initStore.Close()
+
+	const numGoroutines = 20
+	var wg sync.WaitGroup
+	results := make([]*store.Watch, numGoroutines)
+	errorsList := make([]error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			st, err := store.Open(dbPath)
+			if err != nil {
+				errorsList[idx] = err
+				return
+			}
+			defer st.Close()
+
+			w, err := st.EnsureChatWatch()
+			if err != nil {
+				errorsList[idx] = err
+				return
+			}
+			results[idx] = w
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i, err := range errorsList {
+		if err != nil {
+			t.Fatalf("goroutine %d failed: %v", i, err)
+		}
+	}
+
+	// Verify all returned the exact same watch ID
+	firstID := results[0].ID
+	if firstID <= 0 {
+		t.Fatalf("expected positive watch ID, got %d", firstID)
+	}
+	for i, w := range results {
+		if w.ID != firstID {
+			t.Errorf("goroutine %d returned ID %d, expected %d", i, w.ID, firstID)
+		}
+		if w.Name != "chat_monitor" {
+			t.Errorf("goroutine %d returned name %s, expected chat_monitor", i, w.Name)
+		}
+	}
+
+	// Verify duplicate watch name is rejected by unique constraint
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	dupWatch := &store.Watch{
+		Type:        "search",
+		Name:        "chat_monitor", // Duplicate name!
+		Target:      "dup",
+		IntervalSec: 60,
+	}
+	err = s.AddWatch(dupWatch)
+	if err == nil {
+		t.Fatal("expected error adding watch with duplicate name, got nil")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "constraint") {
+		t.Fatalf("expected UNIQUE constraint error, got: %v", err)
+	}
+}
+
+func TestGetSeenItemsOmitsRawJSONAndPruneTTL(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "seen_ttl.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	w := &store.Watch{
+		Type:        "search",
+		Name:        "ttl-watch",
+		Target:      "test",
+		IntervalSec: 100,
+	}
+	if err := s.AddWatch(w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	now := time.Now().UTC()
+	largeJSON := `{"id":"ad-large","description":"` + strings.Repeat("a", 5000) + `"}`
+
+	// 1. Item seen today
+	itemFresh := &store.SeenItem{
+		WatchID:     w.ID,
+		AdID:        "ad-fresh",
+		FirstSeenAt: now,
+		LastSeenAt:  now,
+		LastPrice:   500,
+		LastTitle:   "Fresh item",
+		RawJSON:     largeJSON,
+	}
+	if err := s.UpsertSeenItem(itemFresh); err != nil {
+		t.Fatalf("upsert fresh: %v", err)
+	}
+
+	// 2. Item seen 45 days ago (should be pruned with 30-day TTL)
+	itemOld := &store.SeenItem{
+		WatchID:     w.ID,
+		AdID:        "ad-old",
+		FirstSeenAt: now.Add(-50 * 24 * time.Hour),
+		LastSeenAt:  now.Add(-45 * 24 * time.Hour),
+		LastPrice:   300,
+		LastTitle:   "Old item",
+		RawJSON:     largeJSON,
+	}
+	if err := s.UpsertSeenItem(itemOld); err != nil {
+		t.Fatalf("upsert old: %v", err)
+	}
+
+	// Verify GetSeenItems omits raw_json to save memory
+	seenMap, err := s.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items: %v", err)
+	}
+	if len(seenMap) != 2 {
+		t.Fatalf("expected 2 seen items, got %d", len(seenMap))
+	}
+	if seenMap["ad-fresh"].RawJSON != "" {
+		t.Errorf("expected raw_json to be omitted in GetSeenItems, got length %d", len(seenMap["ad-fresh"].RawJSON))
+	}
+	if seenMap["ad-fresh"].LastPrice != 500 || seenMap["ad-fresh"].LastTitle != "Fresh item" {
+		t.Errorf("unexpected fields in GetSeenItems: %+v", seenMap["ad-fresh"])
+	}
+
+	// Verify GetSeenItem retrieves the full raw_json when explicitly queried
+	singleItem, err := s.GetSeenItem(w.ID, "ad-fresh")
+	if err != nil {
+		t.Fatalf("get single seen item: %v", err)
+	}
+	if len(singleItem.RawJSON) < 5000 {
+		t.Errorf("expected full raw_json in GetSeenItem, got length %d", len(singleItem.RawJSON))
+	}
+
+	// Prune items older than 30 days
+	pruned, err := s.PruneSeenItems(30 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("prune seen items: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("expected 1 item pruned, got %d", pruned)
+	}
+
+	// Check seen items after pruning: old item should be gone, fresh item remains
+	seenAfterPrune, err := s.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("get seen items after prune: %v", err)
+	}
+	if len(seenAfterPrune) != 1 {
+		t.Fatalf("expected 1 item after prune, got %d", len(seenAfterPrune))
+	}
+	if _, ok := seenAfterPrune["ad-fresh"]; !ok {
+		t.Error("expected fresh item to remain after prune")
+	}
+	if _, ok := seenAfterPrune["ad-old"]; ok {
+		t.Error("expected old item to be deleted after prune")
+	}
+}
 
 func TestStoreLifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
