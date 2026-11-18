@@ -269,6 +269,140 @@ func (s *Server) getToolDefinitions() []toolInfo {
 			},
 		},
 		{
+			Name:        "milanuncios_category_resolve",
+			Description: "Find numeric category IDs and canonical category paths by natural language query (e.g. 'coches', 'bicicleta gravel', 'portátiles').",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Natural language category query (e.g. 'coches', 'bicicleta gravel', 'portátiles')",
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name:        "milanuncios_ad_schema",
+			Description: "Retrieve the formal JSON Schema Draft-07 for a category, detailing required fields, attribute enums, numeric ranges, and photo constraints.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"category_id": map[string]any{
+						"type":        "integer",
+						"description": "Numeric Milanuncios category ID",
+					},
+				},
+				"required": []string{"category_id"},
+			},
+		},
+		{
+			Name:        "milanuncios_ad_create",
+			Description: "Create a classified ad on Milanuncios or simulate creation using dry_run=true. Always run with dry_run=true first to inspect any attribute or schema validation errors before publishing.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"spec": map[string]any{
+						"type":        "object",
+						"description": "Full declarative AdSpec object matching milanuncios_ad_schema",
+					},
+					"dry_run": map[string]any{
+						"type":        "boolean",
+						"default":     true,
+						"description": "If true, simulates validation without creating the listing (default true)",
+					},
+				},
+				"required": []string{"spec"},
+			},
+		},
+		{
+			Name:        "milanuncios_ad_update",
+			Description: "Update an existing listing using a partial patch object (RFC 7396). Supports changing price, description, title, or attributes.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Listing ID to update",
+					},
+					"patch": map[string]any{
+						"type":        "object",
+						"description": "Partial patch object containing fields to update (RFC 7396)",
+					},
+				},
+				"required": []string{"ad_id", "patch"},
+			},
+		},
+		{
+			Name:        "milanuncios_ad_delete",
+			Description: "Delete or withdraw an active listing with a structured reason.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Listing ID to delete",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"enum":        []string{"sold_milanuncios", "sold_other", "withdrawn", "expired"},
+						"description": "Reason for deletion (sold_milanuncios, sold_other, withdrawn, expired)",
+					},
+					"feedback": map[string]any{
+						"type":        "string",
+						"description": "Optional closing remarks or feedback",
+					},
+				},
+				"required": []string{"ad_id", "reason"},
+			},
+		},
+		{
+			Name:        "milanuncios_ad_favorite",
+			Description: "Add or remove an ad listing from account favorites.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Listing ID or URL to favorite or unfavorite",
+					},
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"favorite", "unfavorite"},
+						"default":     "favorite",
+						"description": "Action: 'favorite' to add, 'unfavorite' to remove (default: 'favorite')",
+					},
+				},
+				"required": []string{"ad_id"},
+			},
+		},
+		{
+			Name:        "milanuncios_favorite_tag",
+			Description: "Save private local notes, tags, or target purchase price on a listing for autonomous agent decision-making.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Listing numeric ID or URL to annotate",
+					},
+					"tag": map[string]any{
+						"type":        "string",
+						"description": "Tag label (e.g. 'oferta_enviada', 'evaluar', 'interesante')",
+					},
+					"note": map[string]any{
+						"type":        "string",
+						"description": "Optional private agent notes or remarks",
+					},
+					"target_price": map[string]any{
+						"type":        "number",
+						"description": "Optional target purchase price in EUR",
+					},
+				},
+				"required": []string{"ad_id", "tag"},
+			},
+		},
+		{
 			Name:        "milanuncios_me",
 			Description: "Retrieve account profile of the authenticated user.",
 			InputSchema: map[string]any{
@@ -323,11 +457,35 @@ func (s *Server) getToolDefinitions() []toolInfo {
 			},
 		},
 		{
+			Name:        "milanuncios_chat_start",
+			Description: "Initiate a chat conversation with the seller of a Milanuncios listing. Returns conversation ID.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Listing ID or URL to contact",
+					},
+					"message": map[string]any{
+						"type":        "string",
+						"description": "Initial text message to send to the seller",
+					},
+				},
+				"required": []string{"ad_id", "message"},
+			},
+		},
+		{
 			Name:        "milanuncios_chat_list",
 			Description: "List active chat conversations for the authenticated user.",
 			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
+				"type": "object",
+				"properties": map[string]any{
+					"unread_only": map[string]any{
+						"type":        "boolean",
+						"default":     false,
+						"description": "Filter conversations to only include unread threads (default false)",
+					},
+				},
 			},
 		},
 		{
@@ -428,12 +586,7 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		}, nil
 
 	case "milanuncios_category_filters":
-		var catID int
-		if v, ok := args["category_id"].(float64); ok {
-			catID = int(v)
-		} else if sVal, ok := args["category_id"].(string); ok {
-			catID, _ = strconv.Atoi(sVal)
-		}
+		catID := parseCategoryInt(args["category_id"])
 		if catID <= 0 {
 			return nil, fmt.Errorf("category_id must be a positive integer")
 		}
@@ -444,6 +597,209 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 		}
 
 		b, _ := json.MarshalIndent(filters, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_category_resolve":
+		query, _ := args["query"].(string)
+		query = strings.TrimSpace(query)
+		if query == "" {
+			return nil, fmt.Errorf("query is required")
+		}
+
+		cats, err := s.Client.ListCategories(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		matches := resolveCategories(cats, query)
+		b, _ := json.MarshalIndent(matches, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_ad_schema":
+		catID := parseCategoryInt(args["category_id"])
+		if catID <= 0 {
+			return nil, fmt.Errorf("category_id must be a positive integer")
+		}
+
+		schema, err := s.Client.GetCategorySchema(ctx, catID)
+		if err != nil {
+			return nil, err
+		}
+
+		b, _ := json.MarshalIndent(schema, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_ad_create":
+		specRaw, ok := args["spec"]
+		if !ok || specRaw == nil {
+			return nil, fmt.Errorf("spec is required")
+		}
+		specBytes, err := json.Marshal(specRaw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid spec object: %w", err)
+		}
+		var spec milanuncios.AdSpec
+		if err := json.Unmarshal(specBytes, &spec); err != nil {
+			return nil, fmt.Errorf("parsing spec: %w", err)
+		}
+
+		dryRun := true
+		if val, ok := args["dry_run"]; ok {
+			switch v := val.(type) {
+			case bool:
+				dryRun = v
+			case string:
+				if strings.ToLower(v) == "false" || v == "0" {
+					dryRun = false
+				}
+			}
+		}
+
+		if dryRun {
+			report, err := s.Client.ValidateAdSpec(ctx, &spec)
+			if err != nil {
+				return nil, err
+			}
+			b, _ := json.MarshalIndent(report, "", "  ")
+			return &toolCallResult{
+				Content: []contentItem{{Type: "text", Text: string(b)}},
+				IsError: !report.Valid,
+			}, nil
+		}
+
+		// Real creation: validate first so any validation failure returns machine-readable ValidationReport
+		report, err := s.Client.ValidateAdSpec(ctx, &spec)
+		if err != nil {
+			return nil, err
+		}
+		if !report.Valid {
+			b, _ := json.MarshalIndent(report, "", "  ")
+			return &toolCallResult{
+				Content: []contentItem{{Type: "text", Text: string(b)}},
+				IsError: true,
+			}, nil
+		}
+
+		item, err := s.Client.CreateAd(ctx, &spec)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(item, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_ad_update":
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		patch, ok := args["patch"].(map[string]any)
+		if !ok || patch == nil {
+			return nil, fmt.Errorf("patch is required")
+		}
+		res, err := s.Client.UpdateAd(ctx, adID, patch)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(res, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_ad_delete":
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		reason, _ := args["reason"].(string)
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return nil, fmt.Errorf("reason is required")
+		}
+		feedback, _ := args["feedback"].(string)
+		res, err := s.Client.DeleteAd(ctx, adID, reason, feedback)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(res, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_ad_favorite":
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		action := "favorite"
+		if act, ok := args["action"].(string); ok && strings.TrimSpace(act) != "" {
+			action = strings.ToLower(strings.TrimSpace(act))
+		}
+		var err error
+		switch action {
+		case "favorite":
+			err = s.Client.Favorite(ctx, adID)
+		case "unfavorite":
+			err = s.Client.Unfavorite(ctx, adID)
+		default:
+			return nil, fmt.Errorf("invalid action %q (allowed: 'favorite', 'unfavorite')", action)
+		}
+		if err != nil {
+			return nil, err
+		}
+		res := map[string]string{
+			"status": action + "d",
+			"ad_id":  adID,
+		}
+		b, _ := json.MarshalIndent(res, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_favorite_tag":
+		if s.Store == nil {
+			return nil, fmt.Errorf("store not configured")
+		}
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		tag, _ := args["tag"].(string)
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			return nil, fmt.Errorf("tag is required")
+		}
+		note, _ := args["note"].(string)
+		var targetPrice float64
+		if tp, ok := args["target_price"].(float64); ok {
+			targetPrice = tp
+		} else if sVal, ok := args["target_price"].(string); ok {
+			targetPrice, _ = strconv.ParseFloat(sVal, 64)
+		}
+		if err := s.Store.SaveAnnotation(adID, tag, note, targetPrice); err != nil {
+			return nil, err
+		}
+		ann, err := s.Store.GetAnnotation(adID)
+		if err != nil {
+			res := map[string]any{
+				"ad_id":        adID,
+				"tag":          tag,
+				"note":         note,
+				"target_price": targetPrice,
+			}
+			b, _ := json.MarshalIndent(res, "", "  ")
+			return &toolCallResult{
+				Content: []contentItem{{Type: "text", Text: string(b)}},
+			}, nil
+		}
+		b, _ := json.MarshalIndent(ann, "", "  ")
 		return &toolCallResult{
 			Content: []contentItem{{Type: "text", Text: string(b)}},
 		}, nil
@@ -539,11 +895,50 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			Content: []contentItem{{Type: "text", Text: string(b)}},
 		}, nil
 
+	case "milanuncios_chat_start":
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		msg, _ := args["message"].(string)
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			return nil, fmt.Errorf("message is required")
+		}
+		res, err := s.Client.StartConversation(ctx, adID, msg)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(res, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
 	case "milanuncios_chat_list":
+		unreadOnly := false
+		if v, ok := args["unread_only"].(bool); ok {
+			unreadOnly = v
+		} else if sVal, ok := args["unread_only"].(string); ok {
+			if strings.ToLower(sVal) == "true" || sVal == "1" {
+				unreadOnly = true
+			}
+		}
+
 		list, err := s.Client.ListConversations(ctx)
 		if err != nil {
 			return nil, err
 		}
+
+		if unreadOnly {
+			filtered := make(milanuncios.ConversationList, 0)
+			for _, c := range list {
+				if c.Unread {
+					filtered = append(filtered, c)
+				}
+			}
+			list = filtered
+		}
+
 		b, _ := json.MarshalIndent(list, "", "  ")
 		return &toolCallResult{
 			Content: []contentItem{{Type: "text", Text: string(b)}},
@@ -598,4 +993,86 @@ func normalizeString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func parseCategoryInt(v any) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(val))
+		return n
+	case json.Number:
+		n, _ := strconv.Atoi(val.String())
+		return n
+	default:
+		return 0
+	}
+}
+
+// CategoryResolvedMatch represents a category search result with canonical path.
+type CategoryResolvedMatch struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Slug string `json:"slug,omitempty"`
+}
+
+func resolveCategories(cats []milanuncios.Category, query string) []CategoryResolvedMatch {
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	words := strings.Fields(qLower)
+	matches := make([]CategoryResolvedMatch, 0)
+
+	var traverse func(cat milanuncios.Category, parentPath string)
+	traverse = func(cat milanuncios.Category, parentPath string) {
+		currentPath := cat.Name
+		if parentPath != "" {
+			currentPath = parentPath + " > " + cat.Name
+		}
+
+		nameLower := strings.ToLower(cat.Name)
+		pathLower := strings.ToLower(currentPath)
+		slugLower := strings.ToLower(cat.Slug)
+
+		matched := false
+		if strings.Contains(nameLower, qLower) || strings.Contains(pathLower, qLower) || strings.Contains(slugLower, qLower) {
+			matched = true
+		} else if strconv.Itoa(cat.ID) == qLower {
+			matched = true
+		} else if len(words) > 1 {
+			allWords := true
+			for _, w := range words {
+				if !strings.Contains(pathLower, w) && !strings.Contains(slugLower, w) {
+					allWords = false
+					break
+				}
+			}
+			if allWords {
+				matched = true
+			}
+		}
+
+		if matched {
+			matches = append(matches, CategoryResolvedMatch{
+				ID:   cat.ID,
+				Name: cat.Name,
+				Path: currentPath,
+				Slug: cat.Slug,
+			})
+		}
+
+		for _, child := range cat.Children {
+			traverse(child, currentPath)
+		}
+	}
+
+	for _, c := range cats {
+		traverse(c, "")
+	}
+
+	return matches
 }

@@ -875,6 +875,278 @@ class TestMCPSkillsAndAgent(MilanunciosCLITestCase):
         self.assertEqual(res.returncode, 2)
         self.assertIn("unknown install target", res.stderr.lower())
 
+    def _start_mock_mcp_server(self):
+        class _MockMCPHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/api/v1/categories":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = [
+                        {
+                            "id": 10,
+                            "name": "Motor",
+                            "slug": "motor",
+                            "children": [
+                                {"id": 11, "name": "Coches de segunda mano", "slug": "coches-segunda-mano"}
+                            ]
+                        },
+                        {
+                            "id": 20,
+                            "name": "Bicicletas",
+                            "slug": "bicicletas",
+                            "children": [
+                                {"id": 21, "name": "Gravel", "slug": "gravel"}
+                            ]
+                        }
+                    ]
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                elif self.path == "/api/v1/categories/11/filters":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "category_id": 11,
+                        "category_name": "Coches de segunda mano",
+                        "filters": [
+                            {
+                                "key": "fuel",
+                                "label": "Combustible",
+                                "type": "select",
+                                "options": ["diesel", "gasolina", "electrico", "hibrido"]
+                            }
+                        ]
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                elif self.path == "/api/v1/conversations":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = [
+                        {"id": "conv-mcp-1", "ad_id": "492817294", "ad_title": "Golf VII", "unread": True},
+                        {"id": "conv-mcp-2", "ad_id": "123456789", "ad_title": "Bicicleta", "unread": False}
+                    ]
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                if self.path == "/api/v1/ads/492817294/contact":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "conversation_id": "conv-mcp-1",
+                        "ad_id": "492817294",
+                        "message_id": "msg-mcp-1",
+                        "text": "Hola, sigue disponible?",
+                        "sent_at": "2026-11-18T10:00:00Z"
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _MockMCPHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.env["MILANUNCIOS_BASE_URL"] = f"http://127.0.0.1:{port}"
+        return server
+
+    def test_52b_mcp_tool_discovery(self):
+        reqs = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ]
+        input_data = "\n".join(reqs) + "\n"
+        res = self.run_cli("mcp", input_text=input_data)
+        self.assertEqual(res.returncode, 0)
+
+        lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
+        self.assertGreaterEqual(len(lines), 2)
+
+        resp2 = json.loads(lines[1])
+        tools = resp2["result"]["tools"]
+        tool_names = [t["name"] for t in tools]
+
+        expected_new_tools = [
+            "milanuncios_category_resolve",
+            "milanuncios_ad_schema",
+            "milanuncios_ad_create",
+            "milanuncios_ad_update",
+            "milanuncios_ad_delete",
+            "milanuncios_chat_start",
+            "milanuncios_ad_favorite",
+            "milanuncios_favorite_tag",
+        ]
+        for name in expected_new_tools:
+            self.assertIn(name, tool_names, f"Tool {name} missing from tools/list")
+
+        # Verify chat list has unread_only property
+        chat_tool = next(t for t in tools if t["name"] == "milanuncios_chat_list")
+        self.assertIn("unread_only", chat_tool["inputSchema"]["properties"])
+
+    def test_52c_mcp_tool_execution_local_and_validation(self):
+        reqs = [
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "milanuncios_favorite_tag",
+                    "arguments": {
+                        "ad_id": "492817294",
+                        "tag": "analisis_agente",
+                        "note": "Revisar historial ITV",
+                        "target_price": 11500.0
+                    }
+                }
+            }),
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "milanuncios_ad_create",
+                    "arguments": {
+                        "spec": {
+                            "category_id": 11,
+                            "title": "Coche",
+                            "description": "Corto",
+                            "price": 0,
+                            "location": {"province": "Madrid"}
+                        },
+                        "dry_run": True
+                    }
+                }
+            }),
+        ]
+        input_data = "\n".join(reqs) + "\n"
+        res = self.run_cli("mcp", input_text=input_data)
+        self.assertEqual(res.returncode, 0)
+
+        lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
+        self.assertEqual(len(lines), 2)
+
+        resp10 = json.loads(lines[0])
+        content10 = resp10["result"]["content"][0]["text"]
+        self.assertIn("analisis_agente", content10)
+        self.assertIn("Revisar historial ITV", content10)
+        self.assertIn("11500", content10)
+
+        resp11 = json.loads(lines[1])
+        self.assertTrue(resp11["result"].get("isError"))
+        content11 = resp11["result"]["content"][0]["text"]
+        self.assertIn('"valid": false', content11)
+        self.assertIn("E_VAL_", content11)
+
+    def test_52d_mcp_tool_execution_with_mock_server(self):
+        self.env["MILANUNCIOS_SESSION_TOKEN"] = "mock-token-123"
+        server = self._start_mock_mcp_server()
+        try:
+            reqs = [
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "milanuncios_category_resolve",
+                        "arguments": {"query": "coches"}
+                    }
+                }),
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "milanuncios_ad_schema",
+                        "arguments": {"category_id": 11}
+                    }
+                }),
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 22,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "milanuncios_ad_create",
+                        "arguments": {
+                            "spec": {
+                                "category_id": 11,
+                                "title": "Volkswagen Golf VII Advance",
+                                "description": "Vehiculo en excelente estado y mantenimiento oficial.",
+                                "price": 12500,
+                                "location": {"province": "Madrid"},
+                                "attributes": {"fuel": "diesel"}
+                            },
+                            "dry_run": True
+                        }
+                    }
+                }),
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 23,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "milanuncios_chat_start",
+                        "arguments": {
+                            "ad_id": "492817294",
+                            "message": "Hola, sigue disponible?"
+                        }
+                    }
+                }),
+                json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": 24,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "milanuncios_chat_list",
+                        "arguments": {"unread_only": True}
+                    }
+                }),
+            ]
+            input_data = "\n".join(reqs) + "\n"
+            res = self.run_cli("mcp", input_text=input_data)
+            self.assertEqual(res.returncode, 0)
+
+            lines = [line.strip() for line in res.stdout.strip().split("\n") if line.strip()]
+            self.assertEqual(len(lines), 5)
+
+            # 20: category_resolve
+            resp20 = json.loads(lines[0])
+            text20 = resp20["result"]["content"][0]["text"]
+            self.assertIn("Coches de segunda mano", text20)
+
+            # 21: ad_schema
+            resp21 = json.loads(lines[1])
+            text21 = resp21["result"]["content"][0]["text"]
+            self.assertIn("Category_11", text21)
+            self.assertIn("diesel", text21)
+
+            # 22: ad_create dry-run valid
+            resp22 = json.loads(lines[2])
+            self.assertFalse(resp22["result"].get("isError", False))
+            text22 = resp22["result"]["content"][0]["text"]
+            self.assertIn('"valid": true', text22)
+
+            # 23: chat_start
+            resp23 = json.loads(lines[3])
+            text23 = resp23["result"]["content"][0]["text"]
+            self.assertIn("conv-mcp-1", text23)
+
+            # 24: chat_list unread_only
+            resp24 = json.loads(lines[4])
+            text24 = resp24["result"]["content"][0]["text"]
+            self.assertIn("conv-mcp-1", text24)
+            self.assertNotIn("conv-mcp-2", text24)
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 # ==============================================================================
 # 9. ADVANCED I/O INTEGRITY & DEBUG LOGGING (Tests 53 - 54)
