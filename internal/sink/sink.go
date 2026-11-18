@@ -114,10 +114,11 @@ func (s *NtfySink) Send(ctx context.Context, ev store.Event) error {
 
 // WebhookSink delivers raw event JSON to any HTTP webhook endpoint.
 type WebhookSink struct {
-	name      string
-	url       string
-	tokenFile string
-	client    *http.Client
+	name            string
+	url             string
+	tokenFile       string
+	client          *http.Client
+	allowPrivateIPs bool
 }
 
 // NewWebhookSink creates an HTTP webhook sink.
@@ -126,18 +127,37 @@ func NewWebhookSink(name, targetURL, tokenFile string) (*WebhookSink, error) {
 		return nil, output.Usagef("webhook sink requires a url")
 	}
 
+	allowPrivate := os.Getenv("MILANUNCIOS_ALLOW_PRIVATE_IPS") == "true"
+	if err := ValidateWebhookURL(targetURL, allowPrivate); err != nil {
+		return nil, output.Usagef("webhook destination url %q blocked: %v", targetURL, err)
+	}
+
 	return &WebhookSink{
-		name:      name,
-		url:       targetURL,
-		tokenFile: tokenFile,
-		client:    &http.Client{Timeout: 10 * time.Second},
+		name:            name,
+		url:             targetURL,
+		tokenFile:       tokenFile,
+		client:          createSafeWebhookClient(allowPrivate),
+		allowPrivateIPs: allowPrivate,
 	}, nil
+}
+
+// SetAllowPrivateIPs configures whether private IP ranges are permitted.
+func (s *WebhookSink) SetAllowPrivateIPs(allow bool) {
+	s.allowPrivateIPs = allow
+	s.client = createSafeWebhookClient(allow)
 }
 
 func (s *WebhookSink) Name() string { return s.name }
 func (s *WebhookSink) Type() string { return "webhook" }
 
 func (s *WebhookSink) Send(ctx context.Context, ev store.Event) error {
+	allowPrivate := s.allowPrivateIPs || os.Getenv("MILANUNCIOS_ALLOW_PRIVATE_IPS") == "true"
+	if !allowPrivate {
+		if err := ValidateWebhookURL(s.url, false); err != nil {
+			return fmt.Errorf("webhook destination blocked by anti-SSRF policy: %w", err)
+		}
+	}
+
 	reqBody, err := json.Marshal(ev)
 	if err != nil {
 		return err
