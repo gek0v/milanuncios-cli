@@ -1,12 +1,18 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
+	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +28,7 @@ func (a *App) chatCmd() *cobra.Command {
 		a.chatListCmd(),
 		a.chatShowCmd(),
 		a.chatSendCmd(),
+		a.chatWatchCmd(),
 	)
 
 	return cmd
@@ -154,4 +161,153 @@ func (a *App) chatSendCmd() *cobra.Command {
 			return a.Printer.Print(msg)
 		},
 	}
+}
+
+func (a *App) chatWatchCmd() *cobra.Command {
+	var (
+		interval   string
+		once       bool
+		unreadOnly bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Monitor chat conversations for incoming unread messages",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sec, err := parseIntervalSec(interval)
+			if err != nil {
+				return err
+			}
+
+			st, err := a.getStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			chatWatch, err := st.EnsureChatWatch()
+			if err != nil {
+				return fmt.Errorf("initializing chat watch record: %w", err)
+			}
+
+			eng := a.newWatchEngine(st)
+
+			checkCycle := func(ctx context.Context) error {
+				convs, err := a.Client.ListConversations(ctx)
+				if err != nil {
+					return err
+				}
+
+				now := time.Now().UTC()
+
+				for _, c := range convs {
+					if unreadOnly && !c.Unread {
+						continue
+					}
+
+					details, err := a.Client.GetConversation(ctx, c.ID)
+					if err != nil {
+						if !once {
+							fmt.Fprintf(a.Stderr, "failed to get conversation %s: %v\n", c.ID, err)
+						}
+						continue
+					}
+
+					for _, msg := range details.Messages {
+						if msg.FromMe {
+							continue
+						}
+
+						seen, err := st.HasSeenChatMessage(chatWatch.ID, msg.ID)
+						if err != nil {
+							return fmt.Errorf("checking seen status for message %s: %w", msg.ID, err)
+						}
+						if seen {
+							continue
+						}
+
+						// Mark as seen
+						if err := st.MarkChatMessageSeen(chatWatch.ID, msg.ID, msg.Text); err != nil {
+							return fmt.Errorf("marking message %s as seen: %w", msg.ID, err)
+						}
+
+						evPayload := milanuncios.ChatMessageReceivedEvent{
+							EventType:      "chat.message_received",
+							ConversationID: c.ID,
+							AdID:           c.AdID,
+							SenderName:     msg.SenderName,
+							Text:           msg.Text,
+							SentAt:         msg.SentAt,
+						}
+
+						// Record event in SQLite events table
+						storeEv := store.Event{
+							WatchID:     chatWatch.ID,
+							EventType:   "chat.message_received",
+							AdID:        c.AdID,
+							PayloadJSON: store.EncodeJSON(evPayload),
+							CreatedAt:   now,
+						}
+						if err := st.RecordEvent(&storeEv); err != nil {
+							return fmt.Errorf("recording chat event: %w", err)
+						}
+
+						// Dispatch to external sinks
+						if eng.Sinks != nil {
+							errs := eng.Sinks.Dispatch(ctx, storeEv)
+							if len(errs) == 0 {
+								_ = st.MarkEventsDelivered([]int64{storeEv.ID})
+							}
+						}
+
+						// Print event
+						if err := a.Printer.Print(evPayload); err != nil {
+							return err
+						}
+					}
+				}
+
+				return nil
+			}
+
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
+			if once {
+				return checkCycle(ctx)
+			}
+
+			fmt.Fprintf(a.Stderr, "milanuncios-cli chat monitor running (interval: %ds). Press Ctrl+C to stop.\n", sec)
+
+			// Initial check
+			if err := checkCycle(ctx); err != nil {
+				fmt.Fprintf(a.Stderr, "initial chat check error: %v\n", err)
+			}
+
+			ticker := time.NewTicker(time.Duration(sec) * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Fprintln(a.Stderr, "\nStopping chat monitor.")
+					return &output.DomainError{
+						Kind: output.KindInterrupted,
+						Msg:  "chat monitor interrupted by signal",
+					}
+				case <-ticker.C:
+					if err := checkCycle(ctx); err != nil {
+						fmt.Fprintf(a.Stderr, "chat check error: %v\n", err)
+					}
+				}
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&interval, "interval", "30s", "polling interval (e.g. 30s, 1m; min: 10s)")
+	cmd.Flags().BoolVar(&once, "once", false, "run single check cycle and exit immediately")
+	cmd.Flags().BoolVar(&unreadOnly, "unread-only", true, "only check conversations marked as unread")
+
+	return cmd
 }

@@ -1,6 +1,6 @@
 ## milanuncios ad favorite
 
-Add an ad to your account favorites
+Add an ad to your account favorites, or manage local annotations
 
 ```
 milanuncios ad favorite <id|url> [flags]
@@ -26,4 +26,6 @@ milanuncios ad favorite <id|url> [flags]
 ### SEE ALSO
 
 * [milanuncios ad](milanuncios_ad.md)	 - Inspect and interact with Milanuncios ads
+* [milanuncios ad favorite notes](milanuncios_ad_favorite_notes.md)	 - Display local agent annotation and notes for an ad
+* [milanuncios ad favorite tag](milanuncios_ad_favorite_tag.md)	 - Save local agent annotation, note and target price for an ad
 

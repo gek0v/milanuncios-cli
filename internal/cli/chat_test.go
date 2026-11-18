@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -472,6 +473,143 @@ func TestChatListUnreadOnly(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "No conversations found.") {
 			t.Errorf("expected 'No conversations found.', got: %s", stdout.String())
+		}
+	}
+}
+
+func TestChatWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "chat_watch.db")
+	t.Setenv("MILANUNCIOS_STATE_DB", dbPath)
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(tmpDir, "config.toml"))
+
+	// 1. Unauthenticated -> returns error
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{"chat", "watch", "--once"})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("expected error for unauthenticated chat watch, got nil")
+		}
+	}
+
+	// 2. Interval below 10s -> returns error
+	{
+		app := cli.NewApp("test")
+		app.Client.SessionToken = "valid-token"
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{"chat", "watch", "--interval", "5s"})
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("expected error for interval < 10s, got nil")
+		}
+	}
+
+	// 3. Authenticated check with mock server returning unread incoming message
+	messages := []milanuncios.Message{
+		{
+			ID:             "msg-1",
+			ConversationID: "conv-101",
+			SenderName:     "Tú",
+			Text:           "Hola!",
+			SentAt:         "2026-11-18T10:00:00Z",
+			FromMe:         true,
+		},
+		{
+			ID:             "msg-2",
+			ConversationID: "conv-101",
+			SenderName:     "Carlos",
+			Text:           "¿Sigue en venta la PS5?",
+			SentAt:         "2026-11-18T10:05:00Z",
+			FromMe:         false,
+		},
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/conversations":
+			list := milanuncios.ConversationList{
+				{
+					ID:          "conv-101",
+					AdID:        "111",
+					AdTitle:     "PlayStation 5",
+					AdPrice:     450,
+					UserName:    "Carlos",
+					LastMessage: "¿Sigue en venta la PS5?",
+					LastSentAt:  "2026-11-18T10:05:00Z",
+					Unread:      true,
+				},
+			}
+			_ = json.NewEncoder(w).Encode(list)
+		case "/api/v1/conversations/conv-101":
+			details := milanuncios.ConversationDetails{
+				Conversation: milanuncios.Conversation{
+					ID:       "conv-101",
+					AdID:     "111",
+					UserName: "Carlos",
+					Unread:   true,
+				},
+				Messages: messages,
+			}
+			_ = json.NewEncoder(w).Encode(details)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	// First run: msg-2 should be emitted
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		app.Client.SessionToken = "valid-token"
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{"chat", "watch", "--once", "--format", "json"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("chat watch --once failed: %v", err)
+		}
+
+		var ev milanuncios.ChatMessageReceivedEvent
+		if err := json.Unmarshal(stdout.Bytes(), &ev); err != nil {
+			t.Fatalf("failed to decode emitted event: %v, stdout: %s", err, stdout.String())
+		}
+		if ev.EventType != "chat.message_received" {
+			t.Fatalf("expected event_type 'chat.message_received', got %q", ev.EventType)
+		}
+		if ev.ConversationID != "conv-101" || ev.AdID != "111" || ev.SenderName != "Carlos" || ev.Text != "¿Sigue en venta la PS5?" {
+			t.Fatalf("unexpected event data: %+v", ev)
+		}
+	}
+
+	// Second run: msg-2 should be deduplicated, nothing emitted
+	{
+		app := cli.NewApp("test")
+		app.Client.BaseURL = ts.URL
+		app.Client.SessionToken = "valid-token"
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetArgs([]string{"chat", "watch", "--once", "--format", "json"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("second chat watch --once failed: %v", err)
+		}
+
+		if stdout.Len() != 0 {
+			t.Fatalf("expected no events emitted on second run (deduplicated), got: %s", stdout.String())
 		}
 	}
 }

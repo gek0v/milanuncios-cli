@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +181,100 @@ func TestStoreLifecycle(t *testing.T) {
 	eventsAfterDelete, err := s.ListEvents(w1.ID, 10)
 	if err != nil || len(eventsAfterDelete) != 0 {
 		t.Fatalf("expected 0 events after delete, got %d (err: %v)", len(eventsAfterDelete), err)
+	}
+}
+
+func TestStoreFavoriteAnnotationsAndChatWatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "annotations.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer s.Close()
+
+	// 1. Get non-existent annotation -> ErrNotFound
+	_, err = s.GetAnnotation("492817294")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	// 2. Save annotation
+	if err := s.SaveAnnotation("492817294", "oferta_enviada", "Ofrecidos 12.500€ el 18/11.", 12500); err != nil {
+		t.Fatalf("failed to save annotation: %v", err)
+	}
+
+	// 3. Get annotation
+	ann, err := s.GetAnnotation("492817294")
+	if err != nil {
+		t.Fatalf("failed to get annotation: %v", err)
+	}
+	if ann.AdID != "492817294" || ann.Tag != "oferta_enviada" || ann.TargetPrice != 12500 || ann.Note != "Ofrecidos 12.500€ el 18/11." {
+		t.Fatalf("unexpected annotation content: %+v", ann)
+	}
+
+	// 4. Update annotation
+	if err := s.SaveAnnotation("492817294", "contraoferta", "Pide 13.000€.", 12800); err != nil {
+		t.Fatalf("failed to update annotation: %v", err)
+	}
+	ann2, err := s.GetAnnotation("492817294")
+	if err != nil {
+		t.Fatalf("failed to get updated annotation: %v", err)
+	}
+	if ann2.Tag != "contraoferta" || ann2.TargetPrice != 12800 {
+		t.Fatalf("unexpected updated annotation: %+v", ann2)
+	}
+
+	var buf bytes.Buffer
+	ann2.Pretty(&buf, false)
+	if !strings.Contains(buf.String(), "contraoferta") {
+		t.Fatalf("expected pretty output to contain tag, got %s", buf.String())
+	}
+
+	// 5. EnsureChatWatch
+	chatW, err := s.EnsureChatWatch()
+	if err != nil {
+		t.Fatalf("failed to ensure chat watch: %v", err)
+	}
+	if chatW.Type != "chat" || chatW.ID <= 0 {
+		t.Fatalf("unexpected chat watch: %+v", chatW)
+	}
+
+	// EnsureChatWatch second time returns the same watch
+	chatW2, err := s.EnsureChatWatch()
+	if err != nil {
+		t.Fatalf("second ensure chat watch failed: %v", err)
+	}
+	if chatW2.ID != chatW.ID {
+		t.Fatalf("expected same watch ID %d, got %d", chatW.ID, chatW2.ID)
+	}
+
+	// 6. Chat message deduplication
+	seen, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	if err != nil {
+		t.Fatalf("has seen failed: %v", err)
+	}
+	if seen {
+		t.Fatal("expected message not seen yet")
+	}
+
+	if err := s.MarkChatMessageSeen(chatW.ID, "msg-001", "Hola, me interesa"); err != nil {
+		t.Fatalf("mark seen failed: %v", err)
+	}
+
+	seenAfter, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	if err != nil {
+		t.Fatalf("has seen failed after mark: %v", err)
+	}
+	if !seenAfter {
+		t.Fatal("expected message to be seen")
+	}
+
+	// 7. DeleteSeenItem
+	if err := s.DeleteSeenItem(chatW.ID, "chat_msg:msg-001"); err != nil {
+		t.Fatalf("delete seen item failed: %v", err)
+	}
+	seenAfterDelete, err := s.HasSeenChatMessage(chatW.ID, "msg-001")
+	if err != nil || seenAfterDelete {
+		t.Fatalf("expected message not seen after delete, got %v", seenAfterDelete)
 	}
 }

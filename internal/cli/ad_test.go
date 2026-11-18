@@ -584,3 +584,114 @@ func TestAdCreateConflictingFlags(t *testing.T) {
 		t.Errorf("expected error message to mention cannot specify both, got: %s", stderr.String())
 	}
 }
+
+func TestFavoriteAnnotationsCLI(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "annotations.db")
+	t.Setenv("MILANUNCIOS_STATE_DB", dbPath)
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(tmpDir, "config.toml"))
+
+	// 1. Missing args on tag
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"ad", "favorite", "tag"})
+		if code != 2 {
+			t.Fatalf("expected exit code 2 for missing tag args, got %d", code)
+		}
+	}
+
+	// 2. Missing args on notes
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"ad", "favorite", "notes"})
+		if code != 2 {
+			t.Fatalf("expected exit code 2 for missing notes args, got %d", code)
+		}
+	}
+
+	// 3. Notes not found -> 4
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"ad", "favorite", "notes", "999999999"})
+		if code != 4 {
+			t.Fatalf("expected exit code 4 for non-existent annotation, got %d", code)
+		}
+	}
+
+	// 4. Save annotation via 'ad favorite tag'
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"ad", "favorite", "tag", "492817294", "oferta_enviada", "--note", "Ofrecidos 12.500€ el 18/11.", "--target-price", "12500", "--format", "json"})
+		if code != 0 {
+			t.Fatalf("expected exit code 0 for ad favorite tag, got %d (stderr: %s)", code, stderr.String())
+		}
+
+		var res map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode tag confirmation: %v, stdout: %s", err, stdout.String())
+		}
+		if res["status"] != "annotated" || res["ad_id"] != "492817294" || res["tag"] != "oferta_enviada" || res["target_price"] != float64(12500) {
+			t.Fatalf("unexpected tag confirmation: %+v", res)
+		}
+	}
+
+	// 5. Read annotation via 'ad favorite notes'
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"ad", "favorite", "notes", "492817294", "--format", "json"})
+		if code != 0 {
+			t.Fatalf("expected exit code 0 for ad favorite notes, got %d (stderr: %s)", code, stderr.String())
+		}
+
+		var res map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode notes response: %v, stdout: %s", err, stdout.String())
+		}
+		if res["ad_id"] != "492817294" || res["tag"] != "oferta_enviada" || res["note"] != "Ofrecidos 12.500€ el 18/11." {
+			t.Fatalf("unexpected notes response: %+v", res)
+		}
+	}
+
+	// 6. Test top-level 'favorite tag' and 'favorite notes' aliases
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"favorite", "tag", "492817294", "contraoferta", "--format", "json"})
+		if code != 0 {
+			t.Fatalf("expected exit code 0 for favorite tag, got %d (stderr: %s)", code, stderr.String())
+		}
+	}
+
+	{
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+		code := execApp(app, []string{"favorite", "notes", "492817294", "--format", "json"})
+		if code != 0 {
+			t.Fatalf("expected exit code 0 for favorite notes, got %d", code)
+		}
+		var res map[string]any
+		_ = json.Unmarshal(stdout.Bytes(), &res)
+		if res["tag"] != "contraoferta" {
+			t.Fatalf("expected tag 'contraoferta', got %v", res["tag"])
+		}
+	}
+}

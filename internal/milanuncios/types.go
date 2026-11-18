@@ -554,6 +554,27 @@ func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
 	}
 }
 
+// ChatMessageReceivedEvent represents an incoming chat message event.
+type ChatMessageReceivedEvent struct {
+	EventType      string `json:"event_type"`
+	ConversationID string `json:"conversation_id"`
+	AdID           string `json:"ad_id"`
+	SenderName     string `json:"sender_name"`
+	Text           string `json:"text"`
+	SentAt         string `json:"sent_at"`
+}
+
+// Pretty renders the chat event for human terminals.
+func (e ChatMessageReceivedEvent) Pretty(w io.Writer, color bool) {
+	if color {
+		fmt.Fprintf(w, "\x1b[1;32m[MENSAJE ENTRANTE]\x1b[0m \x1b[1m%s\x1b[0m en conversación %s (anuncio %s)\n", e.SenderName, e.ConversationID, e.AdID)
+	} else {
+		fmt.Fprintf(w, "[MENSAJE ENTRANTE] %s en conversación %s (anuncio %s)\n", e.SenderName, e.ConversationID, e.AdID)
+	}
+	fmt.Fprintf(w, "Fecha: %s\n", e.SentAt)
+	fmt.Fprintf(w, "Texto: %s\n\n", e.Text)
+}
+
 // ConversationStartResult represents the response when initiating contact on an ad.
 type ConversationStartResult struct {
 	ConversationID string `json:"conversation_id"`

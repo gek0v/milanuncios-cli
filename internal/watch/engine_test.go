@@ -206,3 +206,136 @@ func TestEngineAdDiffing(t *testing.T) {
 		t.Fatalf("expected 0 results from CheckAll for paused watch, got %d", len(results))
 	}
 }
+
+type mockSinkSender struct {
+	dispatched []store.Event
+}
+
+func (m *mockSinkSender) Dispatch(ctx context.Context, ev store.Event) []error {
+	m.dispatched = append(m.dispatched, ev)
+	return nil
+}
+
+func TestEngineFavoritesWatch(t *testing.T) {
+	var currentFavs []milanuncios.AdItem
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/me/favorites" {
+			_ = json.NewEncoder(w).Encode(currentFavs)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "favorites_test.db"))
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	// Initially no session token -> unauthenticated
+
+	sink := &mockSinkSender{}
+	eng := watch.NewEngine(st, client)
+	eng.Sinks = sink
+
+	w := &store.Watch{
+		Type:   "favorites",
+		Name:   "my-favorites",
+		Target: "favorites",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("failed to add watch: %v", err)
+	}
+
+	// 1. Unauthenticated check should fail with KindAuth error
+	_, err = eng.CheckWatch(context.Background(), w)
+	if err == nil {
+		t.Fatal("expected error on unauthenticated favorites check, got nil")
+	}
+
+	// Now set session token
+	client.SessionToken = "valid-token-123"
+
+	// 2. Initial baseline check
+	currentFavs = []milanuncios.AdItem{
+		{ID: "fav-1", Title: "VW Golf TDI", Price: 5000, URL: "https://milanuncios.com/anuncio/fav-1"},
+		{ID: "fav-2", Title: "Bicicleta Gravel", Price: 800, URL: "https://milanuncios.com/anuncio/fav-2"},
+	}
+
+	res1, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("baseline check failed: %v", err)
+	}
+	if res1.NewItems != 2 {
+		t.Fatalf("expected 2 new items recorded, got %d", res1.NewItems)
+	}
+	if len(res1.Events) != 0 {
+		t.Fatalf("expected 0 events on baseline run, got %d", len(res1.Events))
+	}
+
+	seenMap, err := st.GetSeenItems(w.ID)
+	if err != nil {
+		t.Fatalf("reading seen items: %v", err)
+	}
+	if len(seenMap) != 2 || seenMap["fav-1"].LastPrice != 5000 {
+		t.Fatalf("unexpected seen map: %+v", seenMap)
+	}
+
+	// 3. Price drops on fav-1 (from 5000 to 4500)
+	currentFavs[0].Price = 4500
+	res2, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("price drop check failed: %v", err)
+	}
+	if res2.PriceAlerts != 1 || len(res2.Events) != 1 {
+		t.Fatalf("expected 1 price alert event, got %d (alerts: %d)", len(res2.Events), res2.PriceAlerts)
+	}
+	ev := res2.Events[0]
+	if ev.EventType != "ad.price_changed" || ev.AdID != "fav-1" {
+		t.Fatalf("unexpected event: %+v", ev)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err != nil {
+		t.Fatalf("failed to parse event payload: %v", err)
+	}
+	if payload["old_price"] != float64(5000) || payload["new_price"] != float64(4500) {
+		t.Fatalf("unexpected payload prices: %+v", payload)
+	}
+	if payload["title"] != "VW Golf TDI" || payload["url"] != "https://milanuncios.com/anuncio/fav-1" {
+		t.Fatalf("missing title or url in payload: %+v", payload)
+	}
+	if len(sink.dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched event to sink, got %d", len(sink.dispatched))
+	}
+
+	// 4. Item removed from favorites (fav-2 is removed)
+	currentFavs = []milanuncios.AdItem{currentFavs[0]} // only fav-1 remains
+	res3, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("item removal check failed: %v", err)
+	}
+	if res3.Removed != 1 || len(res3.Events) != 1 {
+		t.Fatalf("expected 1 removed event, got %d (events: %+v)", res3.Removed, res3.Events)
+	}
+	if res3.Events[0].EventType != "ad.removed" || res3.Events[0].AdID != "fav-2" {
+		t.Fatalf("unexpected removed event: %+v", res3.Events[0])
+	}
+	if len(sink.dispatched) != 2 {
+		t.Fatalf("expected 2 total dispatched events to sink, got %d", len(sink.dispatched))
+	}
+
+	// 5. Subsequent run should not trigger ad.removed again
+	res4, err := eng.CheckWatch(context.Background(), w)
+	if err != nil {
+		t.Fatalf("subsequent check failed: %v", err)
+	}
+	if res4.Removed != 0 || len(res4.Events) != 0 {
+		t.Fatalf("expected 0 events on subsequent run, got %d", len(res4.Events))
+	}
+}

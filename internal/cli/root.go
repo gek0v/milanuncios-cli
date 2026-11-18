@@ -94,9 +94,24 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.sinkCmd(),
 		a.mcpCmd(),
 		a.skillsCmd(),
+		a.favoriteCmd(),
 	)
 
 	return root
+}
+
+func (a *App) favoriteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "favorite",
+		Short: "Manage local agent favorite annotations and notes",
+	}
+
+	cmd.AddCommand(
+		a.favoriteTagCmd(),
+		a.favoriteNotesCmd(),
+	)
+
+	return cmd
 }
 
 func (a *App) setup(cmd *cobra.Command) error {

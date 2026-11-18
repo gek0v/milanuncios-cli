@@ -88,7 +88,61 @@ func (a *App) watchAddCmd() *cobra.Command {
 	cmd.AddCommand(
 		a.watchAddSearchCmd(),
 		a.watchAddAdCmd(),
+		a.watchAddFavoritesCmd(),
 	)
+
+	return cmd
+}
+
+func (a *App) watchAddFavoritesCmd() *cobra.Command {
+	var (
+		name     string
+		interval string
+	)
+
+	defInterval := "10m"
+	if a.Cfg != nil && a.Cfg.Watch.Interval != "" {
+		defInterval = a.Cfg.Watch.Interval
+	}
+
+	cmd := &cobra.Command{
+		Use:   "favorites",
+		Short: "Watch account favorites for price drops and removals",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sec, err := parseIntervalSec(interval)
+			if err != nil {
+				return err
+			}
+
+			if name == "" {
+				name = "favorites"
+			}
+
+			st, err := a.getStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			w := &store.Watch{
+				Type:        "favorites",
+				Name:        name,
+				Target:      "favorites",
+				QueryJSON:   "{}",
+				IntervalSec: sec,
+			}
+
+			if err := st.AddWatch(w); err != nil {
+				return fmt.Errorf("saving watch: %w", err)
+			}
+
+			return a.Printer.Print(w)
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "favorites", "friendly name for this watch")
+	cmd.Flags().StringVar(&interval, "interval", defInterval, "check interval (e.g. 10m, 300s, 1h)")
 
 	return cmd
 }

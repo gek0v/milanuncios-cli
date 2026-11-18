@@ -34,6 +34,7 @@ milanuncios [flags]
 * [milanuncios category](milanuncios_category.md)	 - Browse Milanuncios category taxonomy
 * [milanuncios chat](milanuncios_chat.md)	 - View and send messages on Milanuncios
 * [milanuncios config](milanuncios_config.md)	 - Inspect and modify configuration settings
+* [milanuncios favorite](milanuncios_favorite.md)	 - Manage local agent favorite annotations and notes
 * [milanuncios mcp](milanuncios_mcp.md)	 - Model Context Protocol (MCP) JSON-RPC 2.0 server for AI Agents
 * [milanuncios me](milanuncios_me.md)	 - Manage own account, listings and favorites
 * [milanuncios profile](milanuncios_profile.md)	 - Manage multiple Milanuncios accounts side by side

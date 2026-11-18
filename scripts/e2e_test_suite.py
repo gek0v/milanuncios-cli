@@ -538,6 +538,38 @@ class TestAdAndSearchValidation(MilanunciosCLITestCase):
             server.shutdown()
             server.server_close()
 
+    def test_32s_ad_favorite_tag_missing_arguments_exit_code_2(self):
+        res = self.run_cli("ad", "favorite", "tag")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("accepts 2 arg", res.stderr.lower())
+
+    def test_32t_ad_favorite_notes_missing_arguments_exit_code_2(self):
+        res = self.run_cli("ad", "favorite", "notes")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("accepts 1 arg", res.stderr.lower())
+
+    def test_32u_ad_favorite_notes_nonexistent_exit_code_4(self):
+        res = self.run_cli("ad", "favorite", "notes", "999999999")
+        self.assertEqual(res.returncode, 4)
+        self.assertIn("not found", res.stderr.lower())
+
+    def test_32v_ad_favorite_tag_and_notes_lifecycle(self):
+        res = self.run_cli("ad", "favorite", "tag", "492817294", "oferta_enviada", "--note", "Enviada oferta de 12500", "--target-price", "12500", "--format", "json")
+        self.assertEqual(res.returncode, 0)
+        data = json.loads(res.stdout)
+        self.assertEqual(data.get("status"), "annotated")
+        self.assertEqual(data.get("ad_id"), "492817294")
+        self.assertEqual(data.get("tag"), "oferta_enviada")
+        self.assertEqual(data.get("target_price"), 12500.0)
+
+        res2 = self.run_cli("ad", "favorite", "notes", "492817294", "--format", "json")
+        self.assertEqual(res2.returncode, 0)
+        data2 = json.loads(res2.stdout)
+        self.assertEqual(data2.get("ad_id"), "492817294")
+        self.assertEqual(data2.get("tag"), "oferta_enviada")
+        self.assertEqual(data2.get("note"), "Enviada oferta de 12500")
+        self.assertEqual(data2.get("target_price"), 12500.0)
+
     def _start_mock_server(self):
         class _MockCategoryHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -694,10 +726,28 @@ class TestWatchEngine(MilanunciosCLITestCase):
         self.assertEqual(res.returncode, 0)
         self.assertIn("test-item-492", res.stdout)
 
+    def test_36b_watch_add_favorites(self):
+        res = self.run_cli(
+            "watch", "add", "favorites",
+            "--name", "favs-e2e",
+            "--interval", "10m",
+            "--format", "json"
+        )
+        self.assertEqual(res.returncode, 0)
+        data = json.loads(res.stdout)
+        self.assertEqual(data.get("type"), "favorites")
+        self.assertEqual(data.get("name"), "favs-e2e")
+        self.assertEqual(data.get("interval_sec"), 600)
+
     def test_37_watch_add_invalid_interval_fails(self):
         res = self.run_cli("watch", "add", "search", "macbook", "--interval", "bad_interval_format")
         self.assertEqual(res.returncode, 2)
         self.assertIn("invalid interval format", res.stderr.lower())
+
+    def test_37b_watch_add_favorites_invalid_interval(self):
+        res = self.run_cli("watch", "add", "favorites", "--interval", "2s")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("at least 10 seconds", res.stderr.lower())
 
     def test_38_watch_list_reflects_added_items(self):
         self.run_cli("watch", "add", "search", "ps5", "--name", "watch-ps5")
@@ -788,6 +838,15 @@ class TestChatValidation(MilanunciosCLITestCase):
     def test_48d_chat_list_unread_only_unauthenticated_exit_code_3(self):
         res = self.run_cli("chat", "list", "--unread-only")
         self.assertEqual(res.returncode, 3)
+
+    def test_48e_chat_watch_unauthenticated_exit_code_3(self):
+        res = self.run_cli("chat", "watch", "--once")
+        self.assertEqual(res.returncode, 3)
+
+    def test_48f_chat_watch_invalid_interval_exit_code_2(self):
+        res = self.run_cli("chat", "watch", "--interval", "2s")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("at least 10 seconds", res.stderr.lower())
 
 
 # ==============================================================================

@@ -23,5 +23,6 @@ Add a search query or ad listing to monitoring
 
 * [milanuncios watch](milanuncios_watch.md)	 - Monitor searches and listings with local SQLite engine
 * [milanuncios watch add ad](milanuncios_watch_add_ad.md)	 - Watch a specific ad listing for price drops and removal
+* [milanuncios watch add favorites](milanuncios_watch_add_favorites.md)	 - Watch account favorites for price drops and removals
 * [milanuncios watch add search](milanuncios_watch_add_search.md)	 - Watch a search query for new listings and price changes
 

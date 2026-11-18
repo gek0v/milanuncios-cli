@@ -125,6 +125,32 @@ func (el EventList) Pretty(w io.Writer, color bool) {
 	output.Table(w, color, header, rows)
 }
 
+// FavoriteAnnotation stores local agent metadata and notes for an ad.
+type FavoriteAnnotation struct {
+	AdID        string    `json:"ad_id"`
+	Tag         string    `json:"tag"`
+	Note        string    `json:"note"`
+	TargetPrice float64   `json:"target_price"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// Pretty renders the annotation for human reading.
+func (fa *FavoriteAnnotation) Pretty(w io.Writer, color bool) {
+	if color {
+		fmt.Fprintf(w, "\x1b[1mAnotación de Favorito #%s\x1b[0m\n", fa.AdID)
+	} else {
+		fmt.Fprintf(w, "Anotación de Favorito #%s\n", fa.AdID)
+	}
+	fmt.Fprintf(w, "Tag:          %s\n", fa.Tag)
+	if fa.Note != "" {
+		fmt.Fprintf(w, "Nota:         %s\n", fa.Note)
+	}
+	if fa.TargetPrice > 0 {
+		fmt.Fprintf(w, "Precio Obj:   %.2f €\n", fa.TargetPrice)
+	}
+	fmt.Fprintf(w, "Actualizado:  %s\n", fa.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+}
+
 // Store handles persistent SQLite storage for watches, seen items, and events.
 type Store struct {
 	dbPath string
@@ -218,9 +244,18 @@ func (s *Store) migrate() error {
 		FOREIGN KEY (watch_id) REFERENCES watches(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS favorite_annotations (
+		ad_id TEXT PRIMARY KEY,
+		tag TEXT NOT NULL,
+		note TEXT NOT NULL DEFAULT '',
+		target_price REAL NOT NULL DEFAULT 0,
+		updated_at TEXT NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_seen_items_watch ON seen_items(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_watch ON events(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered);
+	CREATE INDEX IF NOT EXISTS idx_fav_annotations_tag ON favorite_annotations(tag);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -544,6 +579,137 @@ func (s *Store) MarkEventsDelivered(ids []int64) error {
 
 	query := fmt.Sprintf(`UPDATE events SET delivered = 1 WHERE id IN (%s)`, placeholders)
 	_, err := s.db.Exec(query, args...)
+	return err
+}
+
+// DeleteSeenItem removes a seen item record from SQLite (e.g. when an ad is removed from favorites).
+func (s *Store) DeleteSeenItem(watchID int64, adID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`DELETE FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, adID)
+	return err
+}
+
+// SaveAnnotation stores or updates agent notes and metadata for an ad.
+func (s *Store) SaveAnnotation(adID, tag, note string, targetPrice float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	query := `
+	INSERT INTO favorite_annotations (ad_id, tag, note, target_price, updated_at)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT(ad_id) DO UPDATE SET
+		tag = excluded.tag,
+		note = excluded.note,
+		target_price = excluded.target_price,
+		updated_at = excluded.updated_at
+	`
+	_, err := s.db.Exec(query, adID, tag, note, targetPrice, now)
+	return err
+}
+
+// GetAnnotation retrieves the local annotation for an ad, or ErrNotFound if absent.
+func (s *Store) GetAnnotation(adID string) (*FavoriteAnnotation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var fa FavoriteAnnotation
+	var updatedStr string
+	query := `SELECT ad_id, tag, note, target_price, updated_at FROM favorite_annotations WHERE ad_id = ? LIMIT 1`
+	err := s.db.QueryRow(query, adID).Scan(&fa.AdID, &fa.Tag, &fa.Note, &fa.TargetPrice, &updatedStr)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if t, err := time.Parse(time.RFC3339, updatedStr); err == nil {
+		fa.UpdatedAt = t
+	}
+	return &fa, nil
+}
+
+// EnsureChatWatch returns the existing chat watch or creates one if it doesn't exist.
+func (s *Store) EnsureChatWatch() (*Watch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var w Watch
+	var lastCheckedStr sql.NullString
+	var createdStr string
+
+	err := s.db.QueryRow(`
+		SELECT id, type, name, target, query_json, interval_sec, last_checked_at, created_at, status
+		FROM watches WHERE type = 'chat' LIMIT 1
+	`).Scan(&w.ID, &w.Type, &w.Name, &w.Target, &w.QueryJSON, &w.IntervalSec, &lastCheckedStr, &createdStr, &w.Status)
+
+	if err == nil {
+		if lastCheckedStr.Valid && lastCheckedStr.String != "" {
+			if t, err := time.Parse(time.RFC3339, lastCheckedStr.String); err == nil {
+				w.LastCheckedAt = &t
+			}
+		}
+		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+			w.CreatedAt = t
+		}
+		return &w, nil
+	}
+
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	res, err := s.db.Exec(`
+		INSERT INTO watches (type, name, target, query_json, interval_sec, created_at, status)
+		VALUES ('chat', 'chat_monitor', 'conversations', '{}', 30, ?, 'active')
+	`, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &Watch{
+		ID:          id,
+		Type:        "chat",
+		Name:        "chat_monitor",
+		Target:      "conversations",
+		QueryJSON:   "{}",
+		IntervalSec: 30,
+		CreatedAt:   now,
+		Status:      "active",
+	}, nil
+}
+
+// HasSeenChatMessage returns true if a message ID has already been recorded for this chat watch.
+func (s *Store) HasSeenChatMessage(watchID int64, msgID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM seen_items WHERE watch_id = ? AND ad_id = ?`, watchID, "chat_msg:"+msgID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// MarkChatMessageSeen records a message ID as seen for this chat watch.
+func (s *Store) MarkChatMessageSeen(watchID int64, msgID string, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(`
+		INSERT INTO seen_items (watch_id, ad_id, first_seen_at, last_seen_at, last_price, last_title, raw_json)
+		VALUES (?, ?, ?, ?, 0, ?, '{}')
+		ON CONFLICT(watch_id, ad_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+	`, watchID, "chat_msg:"+msgID, now, now, output.Truncate(text, 50))
 	return err
 }
 

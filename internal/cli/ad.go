@@ -3,15 +3,18 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
+	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -100,11 +103,17 @@ func (a *App) adOpenCmd() *cobra.Command {
 }
 
 func (a *App) adFavoriteCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "favorite <id|url>",
-		Short: "Add an ad to your account favorites",
-		Args:  cobra.ExactArgs(1),
+		Short: "Add an ad to your account favorites, or manage local annotations",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			if len(args) > 1 {
+				return output.Usagef("accepts 1 arg(s), received %d", len(args))
+			}
 			if err := a.Client.Favorite(cmd.Context(), args[0]); err != nil {
 				return err
 			}
@@ -115,6 +124,121 @@ func (a *App) adFavoriteCmd() *cobra.Command {
 			})
 		},
 	}
+
+	cmd.AddCommand(
+		a.favoriteTagCmd(),
+		a.favoriteNotesCmd(),
+	)
+
+	return cmd
+}
+
+type favoriteAnnotationConfirmation struct {
+	Status      string    `json:"status"`
+	AdID        string    `json:"ad_id"`
+	Tag         string    `json:"tag"`
+	Note        string    `json:"note,omitempty"`
+	TargetPrice float64   `json:"target_price,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (c favoriteAnnotationConfirmation) Pretty(w io.Writer, color bool) {
+	if color {
+		fmt.Fprintf(w, "\x1b[32m✔ Anotación guardada para anuncio #%s\x1b[0m\n", c.AdID)
+	} else {
+		fmt.Fprintf(w, "✔ Anotación guardada para anuncio #%s\n", c.AdID)
+	}
+	fmt.Fprintf(w, "Tag:         %s\n", c.Tag)
+	if c.Note != "" {
+		fmt.Fprintf(w, "Nota:        %s\n", c.Note)
+	}
+	if c.TargetPrice > 0 {
+		fmt.Fprintf(w, "Precio Obj:  %.2f €\n", c.TargetPrice)
+	}
+}
+
+func (a *App) favoriteTagCmd() *cobra.Command {
+	var (
+		note        string
+		targetPrice float64
+	)
+
+	cmd := &cobra.Command{
+		Use:   "tag <ad-id|url> <tag>",
+		Short: "Save local agent annotation, note and target price for an ad",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			adID, err := milanuncios.ExtractAdID(args[0])
+			if err != nil {
+				return output.Usagef("invalid ad ID or URL: %v", err)
+			}
+			tag := strings.TrimSpace(args[1])
+			if tag == "" {
+				return output.Usagef("tag cannot be empty")
+			}
+
+			st, err := a.getStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			if err := st.SaveAnnotation(adID, tag, note, targetPrice); err != nil {
+				return fmt.Errorf("saving annotation: %w", err)
+			}
+
+			ann, err := st.GetAnnotation(adID)
+			if err != nil {
+				return fmt.Errorf("reading annotation: %w", err)
+			}
+
+			return a.Printer.Print(favoriteAnnotationConfirmation{
+				Status:      "annotated",
+				AdID:        ann.AdID,
+				Tag:         ann.Tag,
+				Note:        ann.Note,
+				TargetPrice: ann.TargetPrice,
+				UpdatedAt:   ann.UpdatedAt,
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&note, "note", "", "Agent private note or negotiation status")
+	cmd.Flags().Float64Var(&targetPrice, "target-price", 0, "Target buy/negotiation price in EUR")
+
+	return cmd
+}
+
+func (a *App) favoriteNotesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "notes <ad-id|url>",
+		Short: "Display local agent annotation and notes for an ad",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			adID, err := milanuncios.ExtractAdID(args[0])
+			if err != nil {
+				return output.Usagef("invalid ad ID or URL: %v", err)
+			}
+
+			st, err := a.getStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			ann, err := st.GetAnnotation(adID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return output.NotFoundf("annotation for ad %s not found", adID)
+				}
+				return fmt.Errorf("reading annotation: %w", err)
+			}
+
+			return a.Printer.Print(ann)
+		},
+	}
+
+	return cmd
 }
 
 func (a *App) adUnfavoriteCmd() *cobra.Command {
