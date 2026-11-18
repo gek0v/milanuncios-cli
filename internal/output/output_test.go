@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -189,5 +190,60 @@ func TestTableAndTruncate(t *testing.T) {
 	truncated := output.Truncate("Hello World Long Text", 8)
 	if len([]rune(truncated)) > 8 {
 		t.Fatalf("expected truncated string length <= 8, got %q", truncated)
+	}
+}
+
+func TestSanitizePII(t *testing.T) {
+	raw := `Error at user juan.perez@example.es with phone +34 612 345 678 and mobile 712345678, token Bearer secret-token-123, jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.sig, "password": "supersecretpassword", "phone": "912345678"`
+	sanitized := output.SanitizePII(raw)
+
+	if strings.Contains(sanitized, "juan.perez@example.es") {
+		t.Errorf("email not sanitized: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, "[REDACTED_EMAIL]") {
+		t.Errorf("missing [REDACTED_EMAIL] placeholder: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "612 345 678") || strings.Contains(sanitized, "712345678") {
+		t.Errorf("phone not sanitized: %s", sanitized)
+	}
+	if !strings.Contains(sanitized, "[REDACTED_PHONE]") {
+		t.Errorf("missing [REDACTED_PHONE] placeholder: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "secret-token-123") {
+		t.Errorf("bearer token not sanitized: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "eyJhbGciOiJIUzI1NiJ9") {
+		t.Errorf("jwt token not sanitized: %s", sanitized)
+	}
+	if strings.Contains(sanitized, "supersecretpassword") {
+		t.Errorf("password not sanitized: %s", sanitized)
+	}
+}
+
+func TestIssueURLPIISanitized(t *testing.T) {
+	veryLongBody := strings.Repeat("A", 700) + " contact: test@corp.es phone: 612345678"
+	err := &output.DomainError{
+		Kind:     output.KindAPIChanged,
+		Endpoint: "POST /api/v1/ads",
+		Status:   200,
+		Body:     veryLongBody,
+	}
+
+	rawURL := output.IssueURL("1.0.0", "ad create", err)
+	if strings.Contains(rawURL, "test@corp.es") {
+		t.Errorf("IssueURL contains raw email: %s", rawURL)
+	}
+	if strings.Contains(rawURL, "612345678") {
+		t.Errorf("IssueURL contains raw phone: %s", rawURL)
+	}
+
+	// Verify length of details query param <= 500
+	parsed, parseErr := url.Parse(rawURL)
+	if parseErr != nil {
+		t.Fatalf("failed to parse IssueURL: %v", parseErr)
+	}
+	details := parsed.Query().Get("details")
+	if len([]rune(details)) > 500 {
+		t.Fatalf("expected details length <= 500, got %d", len([]rune(details)))
 	}
 }

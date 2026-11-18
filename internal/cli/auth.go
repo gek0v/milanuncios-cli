@@ -63,6 +63,11 @@ func (a *App) authLoginCmd() *cobra.Command {
 				return err
 			}
 
+			// Validate JWT expiration before verifying
+			if expTime, isExpired, err := milanuncios.ParseJWTExpiration(token); err == nil && expTime != nil && isExpired {
+				return output.Authf("session token expired on %s. Please log in to milanuncios.com in your browser and export fresh cookies", expTime.Format(time.RFC3339))
+			}
+
 			a.Client.SetSession(token)
 
 			// Verify session against Milanuncios API
@@ -126,15 +131,32 @@ func (a *App) authStatusCmd() *cobra.Command {
 				"check_live": check,
 			}
 
+			var tokenExpired bool
+			if hasSession {
+				if expTime, isExpired, err := milanuncios.ParseJWTExpiration(a.Client.SessionToken); err == nil && expTime != nil {
+					res["expires_at"] = expTime.Format(time.RFC3339)
+					res["expired"] = isExpired
+					tokenExpired = isExpired
+					if isExpired {
+						res["valid"] = false
+					}
+				}
+			}
+
 			if hasSession && check {
-				me, err := a.Client.Me(cmd.Context())
-				if err != nil {
+				if tokenExpired {
 					res["valid"] = false
-					res["error"] = err.Error()
+					res["error"] = "session token has expired"
 				} else {
-					res["valid"] = true
-					res["name"] = me.Name
-					res["email"] = me.Email
+					me, err := a.Client.Me(cmd.Context())
+					if err != nil {
+						res["valid"] = false
+						res["error"] = err.Error()
+					} else {
+						res["valid"] = true
+						res["name"] = me.Name
+						res["email"] = me.Email
+					}
 				}
 			}
 

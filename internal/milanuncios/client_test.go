@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -833,4 +834,202 @@ func TestStartConversation(t *testing.T) {
 			t.Errorf("unexpected conversation id: %s", res.ConversationID)
 		}
 	})
+}
+
+func TestWAFChallengeHTMLClassification(t *testing.T) {
+	// 1. Cloudflare Turnstile interstitial returning HTTP 200 with HTML
+	{
+		tsTurnstile := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><div id="cf-turnstile">Checking your browser before accessing milanuncios.com</div></body></html>`))
+		}))
+		defer tsTurnstile.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = tsTurnstile.URL
+		var onBlockCalled bool
+		client.OnBlock = func(ctx context.Context) {
+			onBlockCalled = true
+		}
+
+		_, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+		if err == nil {
+			t.Fatal("expected error for WAF Turnstile challenge on HTTP 200, got nil")
+		}
+		classified := output.Classify(err, "1.0", "search")
+		if classified.Code != 5 {
+			t.Fatalf("expected Exit Code 5 (blocked) for WAF Turnstile challenge, got Exit Code %d (category: %s)", classified.Code, classified.Category)
+		}
+		if !onBlockCalled {
+			t.Error("expected OnBlock callback to be triggered for WAF challenge")
+		}
+	}
+
+	// 2. Datadome returning HTTP 200 with HTML challenge
+	{
+		tsDatadome := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><head><title>Datadome Challenge</title></head><body><script src="https://ct.datadome.co/tags.js"></script><p>Please complete captcha challenge</p></body></html>`))
+		}))
+		defer tsDatadome.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = tsDatadome.URL
+
+		_, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+		if err == nil {
+			t.Fatal("expected error for Datadome challenge on HTTP 200, got nil")
+		}
+		classified := output.Classify(err, "1.0", "search")
+		if classified.Code != 5 {
+			t.Fatalf("expected Exit Code 5 (blocked) for Datadome challenge, got Exit Code %d (category: %s)", classified.Code, classified.Category)
+		}
+	}
+
+	// 3. API endpoint returning text/html interstitial on HTTP 200 without explicit challenge keywords
+	{
+		tsHTML := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>An unexpected HTML interstitial page from WAF</body></html>`))
+		}))
+		defer tsHTML.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = tsHTML.URL
+
+		_, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+		if err == nil {
+			t.Fatal("expected error for HTML interstitial on HTTP 200, got nil")
+		}
+		classified := output.Classify(err, "1.0", "search")
+		if classified.Code != 5 {
+			t.Fatalf("expected Exit Code 5 (blocked) for HTML interstitial, got Exit Code %d", classified.Code)
+		}
+	}
+
+	// 4. Legitimate JSON response containing words like "challenge" must NOT be blocked
+	{
+		tsValid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"items":[{"id":"123","title":"Dodge Challenger SRT","price":35000}],"total":1}`))
+		}))
+		defer tsValid.Close()
+
+		client := milanuncios.NewClient("test")
+		client.BaseURL = tsValid.URL
+
+		res, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+		if err != nil {
+			t.Fatalf("unexpected error for legitimate Dodge Challenger listing: %v", err)
+		}
+		if len(res.Items) != 1 || res.Items[0].Title != "Dodge Challenger SRT" {
+			t.Fatalf("unexpected search result: %+v", res)
+		}
+	}
+}
+
+func TestProxySOCKS5AndSOCKS5h(t *testing.T) {
+	client := milanuncios.NewClient("test")
+
+	// Test socks5h URL
+	uSocks5h, err := url.Parse("socks5h://user:secret123@127.0.0.1:1080")
+	if err != nil {
+		t.Fatalf("parsing socks5h url: %v", err)
+	}
+	client.UseProxy(uSocks5h)
+
+	if client.Proxy != "socks5h://user:xxxxx@127.0.0.1:1080" {
+		t.Fatalf("unexpected redacted proxy: %s", client.Proxy)
+	}
+
+	tr, ok := client.HTTP.Transport.(*http.Transport)
+	if !ok || tr.DialContext == nil {
+		t.Fatal("expected http.Transport with DialContext configured for socks5h")
+	}
+
+	// Test standard socks5 URL
+	uSocks5, err := url.Parse("socks5://user:secret456@127.0.0.1:1080")
+	if err != nil {
+		t.Fatalf("parsing socks5 url: %v", err)
+	}
+	client.UseProxy(uSocks5)
+
+	tr2, ok := client.HTTP.Transport.(*http.Transport)
+	if !ok || tr2.DialContext == nil {
+		t.Fatal("expected http.Transport with DialContext configured for socks5")
+	}
+}
+
+func TestProxyURLEncodedPasswordRedaction(t *testing.T) {
+	client := milanuncios.NewClient("test")
+
+	// Proxy with URL-encoded characters in password (e.g. P@ss word -> P%40ss%20word)
+	rawProxy := "http://user:P%40ss%20word@127.0.0.1:8080"
+	u, err := url.Parse(rawProxy)
+	if err != nil {
+		t.Fatalf("parsing proxy url: %v", err)
+	}
+
+	client.UseProxy(u)
+
+	// Verify both decoded "P@ss word" and encoded "P%40ss%20word" are redacted
+	simulatedNetErr := errors.New("connection failed to 127.0.0.1:8080 with auth user:P%40ss%20word or P@ss word or P%40ss+word")
+	errMsg := fmt.Sprintf("failed connecting through proxy %s with error %s", client.Proxy, simulatedNetErr.Error())
+	redactedMsg := client.RedactString(errMsg)
+	if strings.Contains(redactedMsg, "P@ss word") || strings.Contains(redactedMsg, "P%40ss%20word") || strings.Contains(redactedMsg, "P%40ss+word") {
+		t.Fatalf("expected password forms to be redacted, got: %s", redactedMsg)
+	}
+}
+
+func TestStandardBrowserHeaders(t *testing.T) {
+	var capturedHeaders http.Header
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"total":0}`))
+	}))
+	defer ts.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+
+	_, err := client.Search(context.Background(), milanuncios.SearchQuery{})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+
+	expectedHeaders := []string{
+		"Accept-Language",
+		"Sec-Ch-Ua",
+		"Sec-Ch-Ua-Mobile",
+		"Sec-Ch-Ua-Platform",
+		"Sec-Fetch-Site",
+		"Sec-Fetch-Mode",
+		"Sec-Fetch-Dest",
+	}
+
+	for _, h := range expectedHeaders {
+		val := capturedHeaders.Get(h)
+		if val == "" {
+			t.Errorf("expected header %q to be present, but was empty", h)
+		}
+	}
+
+	if capturedHeaders.Get("Accept-Language") != "es-ES,es;q=0.9,en;q=0.8" {
+		t.Errorf("unexpected Accept-Language: %s", capturedHeaders.Get("Accept-Language"))
+	}
+	if capturedHeaders.Get("Sec-Fetch-Site") != "same-origin" {
+		t.Errorf("unexpected Sec-Fetch-Site: %s", capturedHeaders.Get("Sec-Fetch-Site"))
+	}
+	if capturedHeaders.Get("Sec-Fetch-Mode") != "cors" {
+		t.Errorf("unexpected Sec-Fetch-Mode: %s", capturedHeaders.Get("Sec-Fetch-Mode"))
+	}
+	if capturedHeaders.Get("Sec-Fetch-Dest") != "empty" {
+		t.Errorf("unexpected Sec-Fetch-Dest: %s", capturedHeaders.Get("Sec-Fetch-Dest"))
+	}
 }

@@ -3,7 +3,9 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -54,31 +56,44 @@ func (e *Engine) CheckWatch(ctx context.Context, w *store.Watch) (*CheckResult, 
 		WatchType: w.Type,
 	}
 
+	var events []store.Event
+	var err error
+
 	switch w.Type {
 	case "search":
-		events, err := e.checkSearchWatch(ctx, w, res)
-		if err != nil {
-			return nil, err
-		}
-		res.Events = events
-
+		events, err = e.checkSearchWatch(ctx, w, res)
 	case "ad":
-		events, err := e.checkAdWatch(ctx, w, res)
-		if err != nil {
-			return nil, err
-		}
-		res.Events = events
-
+		events, err = e.checkAdWatch(ctx, w, res)
 	case "favorites":
-		events, err := e.checkFavoritesWatch(ctx, w, res)
-		if err != nil {
-			return nil, err
-		}
-		res.Events = events
-
+		events, err = e.checkFavoritesWatch(ctx, w, res)
 	default:
 		return nil, output.Usagef("unknown watch type %q", w.Type)
 	}
+
+	if err != nil {
+		var de *output.DomainError
+		if errors.As(err, &de) && (de.Status == http.StatusUnauthorized || de.Kind == output.KindAuth) {
+			_ = e.Store.UpdateWatchStatus(w.ID, "paused")
+			ev := store.Event{
+				WatchID:   w.ID,
+				EventType: "watch.paused",
+				PayloadJSON: store.EncodeJSON(map[string]any{
+					"event":    "watch.paused",
+					"watch_id": w.ID,
+					"name":     w.Name,
+					"reason":   "session_expired",
+					"notice":   "session expired (HTTP 401); watch paused",
+				}),
+				CreatedAt: time.Now().UTC(),
+			}
+			_ = e.Store.RecordEvent(&ev)
+			if e.Notice != nil {
+				e.Notice(fmt.Sprintf("watch %d (%s) paused: session expired (HTTP 401)", w.ID, w.Name))
+			}
+		}
+		return nil, err
+	}
+	res.Events = events
 
 	// Dispatch to external sinks and mark delivered
 	if e.Sinks != nil && len(res.Events) > 0 {
@@ -289,8 +304,18 @@ func (e *Engine) checkFavoritesWatch(ctx context.Context, w *store.Watch, res *C
 	if e.Client == nil || e.Client.SessionToken == "" {
 		return nil, &output.DomainError{
 			Kind:     output.KindAuth,
+			Status:   http.StatusUnauthorized,
 			Endpoint: "GET /api/v1/me/favorites",
 			Msg:      "this command requires an authenticated profile. Run `milanuncios auth login`",
+		}
+	}
+
+	if expTime, isExpired, _ := milanuncios.ParseJWTExpiration(e.Client.SessionToken); isExpired && expTime != nil {
+		return nil, &output.DomainError{
+			Kind:     output.KindAuth,
+			Status:   http.StatusUnauthorized,
+			Endpoint: "GET /api/v1/me/favorites",
+			Msg:      fmt.Sprintf("session token expired on %s. Run `milanuncios auth login`", expTime.Format(time.RFC3339)),
 		}
 	}
 

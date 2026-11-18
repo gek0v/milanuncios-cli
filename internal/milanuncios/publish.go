@@ -632,6 +632,7 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 	}
 	req.Header.Set("User-Agent", c.currentUA())
 	req.Header.Set("Accept", "application/json")
+	c.setBrowserHeaders(req.Header)
 	req.Header.Set("Content-Type", mpWriter.FormDataContentType())
 	if c.SessionToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.SessionToken)
@@ -657,7 +658,7 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 			Msg:      "media upload requires authentication. Run `milanuncios auth login`",
 		}
 	}
-	if isBotStatus(resp.StatusCode, raw) {
+	if isBotStatus(resp.StatusCode, raw) || isWAFChallenge(resp.Header.Get("Content-Type"), raw) {
 		if c.OnBlock != nil {
 			c.OnBlock(ctx)
 		}
@@ -665,6 +666,7 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 			Kind:      output.KindBlocked,
 			Status:    resp.StatusCode,
 			Endpoint:  "POST /api/v1/media/upload",
+			Body:      c.snippet("POST /api/v1/media/upload", raw),
 			Retryable: true,
 			Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
 		}
@@ -674,7 +676,7 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 			Kind:     output.KindGeneric,
 			Status:   resp.StatusCode,
 			Endpoint: "POST /api/v1/media/upload",
-			Msg:      fmt.Sprintf("unexpected HTTP %d from media upload: %s", resp.StatusCode, string(raw)),
+			Msg:      fmt.Sprintf("unexpected HTTP %d from media upload: %s", resp.StatusCode, c.snippet("POST /api/v1/media/upload", raw)),
 		}
 	}
 
@@ -684,11 +686,24 @@ func (c *Client) UploadPhoto(ctx context.Context, photoRef string, index int) (*
 		ID      string `json:"id,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &uploadResp); err != nil {
+		if isWAFChallenge(resp.Header.Get("Content-Type"), raw) {
+			if c.OnBlock != nil {
+				c.OnBlock(ctx)
+			}
+			return nil, &output.DomainError{
+				Kind:      output.KindBlocked,
+				Status:    resp.StatusCode,
+				Endpoint:  "POST /api/v1/media/upload",
+				Body:      c.snippet("POST /api/v1/media/upload", raw),
+				Retryable: true,
+				Msg:       "milanuncios blocked or rate-limited the request. Wait 15 minutes before retrying",
+			}
+		}
 		return nil, &output.DomainError{
 			Kind:     output.KindAPIChanged,
 			Status:   resp.StatusCode,
 			Endpoint: "POST /api/v1/media/upload",
-			Body:     "json decode: " + err.Error() + "; body: " + string(raw),
+			Body:     "json decode: " + err.Error() + "; body: " + c.snippet("POST /api/v1/media/upload", raw),
 			Msg:      "milanuncios returned an unexpected response structure from media upload",
 		}
 	}
