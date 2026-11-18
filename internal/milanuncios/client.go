@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,9 +19,44 @@ import (
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/output"
+	"golang.org/x/net/proxy"
 )
 
-const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+func browserUA() string {
+	return browserUAForOS(runtime.GOOS)
+}
+
+func browserUAForOS(goos string) string {
+	switch goos {
+	case "darwin":
+		return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	case "linux":
+		return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	default:
+		return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	}
+}
+
+func browserPlatformForOS(goos string) string {
+	switch goos {
+	case "darwin":
+		return `"macOS"`
+	case "linux":
+		return `"Linux"`
+	default:
+		return `"Windows"`
+	}
+}
+
+func (c *Client) setBrowserHeaders(h http.Header) {
+	h.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
+	h.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	h.Set("Sec-Ch-Ua-Mobile", "?0")
+	h.Set("Sec-Ch-Ua-Platform", browserPlatformForOS(runtime.GOOS))
+	h.Set("Sec-Fetch-Site", "same-origin")
+	h.Set("Sec-Fetch-Mode", "cors")
+	h.Set("Sec-Fetch-Dest", "empty")
+}
 
 type contextKey string
 
@@ -219,29 +255,74 @@ func (c *Client) redact(s string) string {
 	return s
 }
 
+// RedactString sanitizes registered secrets from any string.
+func (c *Client) RedactString(s string) string {
+	return c.redact(s)
+}
+
 // UseProxy configures an HTTP/SOCKS5 proxy for all requests without direct fallback.
 func (c *Client) UseProxy(u *url.URL) {
 	if u.User != nil {
 		if p, ok := u.User.Password(); ok && p != "" {
 			c.Redact(p)
+			queryEscaped := url.QueryEscape(p)
+			c.Redact(queryEscaped)
+			c.Redact(strings.ReplaceAll(queryEscaped, "+", "%20"))
+			c.Redact(url.PathEscape(p))
+			userInfo := u.User.String()
+			if idx := strings.Index(userInfo, ":"); idx != -1 {
+				rawPass := userInfo[idx+1:]
+				if rawPass != "" {
+					c.Redact(rawPass)
+				}
+			}
 		}
 	}
 	c.Proxy = u.Redacted()
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(u),
-		DialContext: (&net.Dialer{
+
+	switch u.Scheme {
+	case "socks5", "socks5h":
+		baseDialer := &net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		}
+		dialer, err := proxy.FromURL(u, baseDialer)
+		if err != nil {
+			c.HTTP.Transport = &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return nil, err
+				},
+			}
+			return
+		}
+		if cd, ok := dialer.(proxy.ContextDialer); ok {
+			c.HTTP.Transport = &http.Transport{
+				DialContext: cd.DialContext,
+			}
+		} else {
+			c.HTTP.Transport = &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				},
+			}
+		}
+	default:
+		transport := &http.Transport{
+			Proxy: http.ProxyURL(u),
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		}
+		c.HTTP.Transport = transport
 	}
-	c.HTTP.Transport = transport
 }
 
 func (c *Client) currentUA() string {
 	c.uaMu.Lock()
 	defer c.uaMu.Unlock()
 	if c.useBrowserUA {
-		return browserUA
+		return browserUA()
 	}
 	return c.UserAgent
 }
@@ -267,8 +348,38 @@ func isWAFBlock(body []byte) bool {
 		strings.Contains(lower, "attention required")
 }
 
+func isWAFChallenge(contentType string, body []byte) bool {
+	lowerCT := strings.ToLower(contentType)
+	lowerBody := strings.ToLower(string(body))
+
+	hasChallengeSig := strings.Contains(lowerBody, "captcha") ||
+		strings.Contains(lowerBody, "challenge") ||
+		strings.Contains(lowerBody, "datadome") ||
+		strings.Contains(lowerBody, "turnstile") ||
+		strings.Contains(lowerBody, "cloudflare") ||
+		strings.Contains(lowerBody, "akamai") ||
+		strings.Contains(lowerBody, "access denied") ||
+		strings.Contains(lowerBody, "attention required")
+
+	isHTML := strings.Contains(lowerCT, "text/html") ||
+		strings.Contains(lowerCT, "application/xhtml+xml") ||
+		strings.Contains(lowerBody, "<!doctype html") ||
+		strings.Contains(lowerBody, "<html")
+
+	if isHTML {
+		if hasChallengeSig || strings.Contains(lowerCT, "text/html") {
+			return true
+		}
+	}
+
+	return hasChallengeSig && strings.HasPrefix(strings.TrimSpace(lowerBody), "<")
+}
+
 func isBotStatus(status int, body []byte) bool {
-	return status == http.StatusTooManyRequests || status == http.StatusForbidden
+	if status == http.StatusTooManyRequests || status == http.StatusForbidden {
+		return true
+	}
+	return isWAFChallenge("", body)
 }
 
 func (c *Client) debugf(format string, args ...any) {
@@ -328,6 +439,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		}
 		req.Header.Set("User-Agent", c.currentUA())
 		req.Header.Set("Accept", "application/json")
+		c.setBrowserHeaders(req.Header)
 		if len(bodyBytes) > 0 {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -368,8 +480,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 	}
 	c.debugf("< %d %s (%d bytes)", resp.StatusCode, endpoint, len(raw))
 
-	// If WAF blocks honest UA with 403 HTML, retry once with realistic browser UA
-	if resp.StatusCode == http.StatusForbidden && isWAFBlock(raw) && !c.isBrowserUA() {
+	// If WAF blocks honest UA with 403 HTML or challenge page, retry once with realistic browser UA
+	if (resp.StatusCode == http.StatusForbidden && isWAFBlock(raw) || isWAFChallenge(resp.Header.Get("Content-Type"), raw)) && !c.isBrowserUA() {
 		c.setBrowserUA()
 		if c.Notice != nil {
 			c.Notice("milanuncios rejected cli user agent; retrying with browser user agent")
@@ -397,7 +509,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 		c.debugf("< %d %s (%d bytes, browser UA)", resp.StatusCode, endpoint, len(raw))
 	}
 
-	if isBotStatus(resp.StatusCode, raw) {
+	if isBotStatus(resp.StatusCode, raw) || isWAFChallenge(resp.Header.Get("Content-Type"), raw) {
 		cooldown := parseCooldown(resp)
 		until := time.Now().Add(cooldown)
 		c.SetBlockedUntil(until)
@@ -454,6 +566,22 @@ func (c *Client) doRequest(ctx context.Context, method, path string, query url.V
 
 	if out != nil && len(bytes.TrimSpace(raw)) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
+			if isWAFChallenge(resp.Header.Get("Content-Type"), raw) {
+				cooldown := parseCooldown(resp)
+				until := time.Now().Add(cooldown)
+				c.SetBlockedUntil(until)
+				if c.OnBlock != nil {
+					c.OnBlock(until)
+				}
+				return &output.DomainError{
+					Kind:      output.KindBlocked,
+					Status:    resp.StatusCode,
+					Endpoint:  endpoint,
+					Body:      c.snippet(endpoint, raw),
+					Retryable: false,
+					Msg:       fmt.Sprintf("milanuncios blocked or rate-limited the request. Wait until %s before retrying", until.Local().Format("15:04:05")),
+				}
+			}
 			return &output.DomainError{
 				Kind:     output.KindAPIChanged,
 				Status:   resp.StatusCode,
@@ -473,6 +601,7 @@ func (c *Client) snippet(endpoint string, raw []byte) string {
 	}
 	s := strings.TrimSpace(string(raw))
 	s = output.Truncate(s, 300)
+	s = output.SanitizePII(s)
 	return c.redact(s)
 }
 

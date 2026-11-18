@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"text/tabwriter"
@@ -352,6 +353,28 @@ func Classify(err error, version, command string) Envelope {
 	return env
 }
 
+var (
+	emailRegex        = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+	jwtRegex          = regexp.MustCompile(`\bey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b`)
+	bearerRegex       = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9_\-\.]+`)
+	jsonSecretRegex   = regexp.MustCompile(`(?i)"(password|passwd|token|secret|session_token)"\s*:\s*"[^"]*"`)
+	cookieRegex       = regexp.MustCompile(`(?i)\b(token|session|adevinta_session)=[^;\s&]+`)
+	jsonPhoneRegex    = regexp.MustCompile(`(?i)"(phone|telephone|mobile|tlf|celular)"\s*:\s*"[^"]*"`)
+	spanishPhoneRegex = regexp.MustCompile(`(?:\b|\+)(?:34[\s.-]*)?[6789]\d{2}[\s.-]?\d{3}[\s.-]?\d{3}\b`)
+)
+
+// SanitizePII removes emails, phone numbers, tokens, and credentials from error strings.
+func SanitizePII(s string) string {
+	s = jsonSecretRegex.ReplaceAllString(s, `"$1": "[REDACTED]"`)
+	s = jsonPhoneRegex.ReplaceAllString(s, `"$1": "[REDACTED_PHONE]"`)
+	s = emailRegex.ReplaceAllString(s, "[REDACTED_EMAIL]")
+	s = jwtRegex.ReplaceAllString(s, "[REDACTED_TOKEN]")
+	s = bearerRegex.ReplaceAllString(s, "Bearer [REDACTED_TOKEN]")
+	s = cookieRegex.ReplaceAllString(s, "$1=[REDACTED]")
+	s = spanishPhoneRegex.ReplaceAllString(s, "[REDACTED_PHONE]")
+	return s
+}
+
 // IssueURL generates a prefilled GitHub issue URL when an API change (Exit 7) is detected.
 func IssueURL(version, command string, e *DomainError) string {
 	q := url.Values{}
@@ -364,7 +387,9 @@ func IssueURL(version, command string, e *DomainError) string {
 	if e.Status != 0 {
 		q.Set("status", fmt.Sprint(e.Status))
 	}
-	q.Set("details", e.Body)
+	details := SanitizePII(e.Body)
+	details = Truncate(details, 500)
+	q.Set("details", details)
 	return repoURL + "/issues/new?" + q.Encode()
 }
 

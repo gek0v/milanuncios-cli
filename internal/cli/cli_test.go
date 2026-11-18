@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
 	"github.com/gek0v/milanuncios-cli/internal/config"
@@ -523,6 +525,110 @@ func TestAuthAndProfileCommands(t *testing.T) {
 
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("profile list failed: %v", err)
+		}
+	}
+
+	// 3. auth status with expired JWT
+	{
+		pastExp := time.Now().Add(-1 * time.Hour).Unix()
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		claims, _ := json.Marshal(map[string]any{"exp": pastExp})
+		payloadB64 := base64.RawURLEncoding.EncodeToString(claims)
+		expiredJWT := fmt.Sprintf("%s.%s.sig", header, payloadB64)
+		t.Setenv("MILANUNCIOS_SESSION_TOKEN", expiredJWT)
+
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"auth", "status", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("auth status failed: %v", err)
+		}
+		var res map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode auth status json: %v", err)
+		}
+		if res["logged_in"] != true {
+			t.Fatalf("expected logged_in: true, got: %v", res["logged_in"])
+		}
+		if res["expired"] != true {
+			t.Fatalf("expected expired: true, got: %v", res["expired"])
+		}
+		if res["valid"] != false {
+			t.Fatalf("expected valid: false for expired token, got: %v", res["valid"])
+		}
+	}
+
+	// 4. auth status with valid future JWT
+	{
+		futureExp := time.Now().Add(24 * time.Hour).Unix()
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		claims, _ := json.Marshal(map[string]any{"exp": futureExp})
+		payloadB64 := base64.RawURLEncoding.EncodeToString(claims)
+		validJWT := fmt.Sprintf("%s.%s.sig", header, payloadB64)
+		t.Setenv("MILANUNCIOS_SESSION_TOKEN", validJWT)
+
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"auth", "status", "--format", "json"})
+
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("auth status failed: %v", err)
+		}
+		var res map[string]interface{}
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to decode auth status json: %v", err)
+		}
+		if res["logged_in"] != true {
+			t.Fatalf("expected logged_in: true, got: %v", res["logged_in"])
+		}
+		if res["expired"] != false {
+			t.Fatalf("expected expired: false, got: %v", res["expired"])
+		}
+		if res["expires_at"] == nil || res["expires_at"] == "" {
+			t.Fatalf("expected non-empty expires_at, got: %v", res["expires_at"])
+		}
+	}
+
+	// 5. auth login with expired JWT cookie file fails
+	{
+		pastExp := time.Now().Add(-1 * time.Hour).Unix()
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+		claims, _ := json.Marshal(map[string]any{"exp": pastExp})
+		payloadB64 := base64.RawURLEncoding.EncodeToString(claims)
+		expiredJWT := fmt.Sprintf("%s.%s.sig", header, payloadB64)
+
+		cookiePath := filepath.Join(tmpDir, "expired_cookies.txt")
+		_ = os.WriteFile(cookiePath, []byte("token="+expiredJWT), 0600)
+
+		app := cli.NewApp("test")
+		var stdout, stderr bytes.Buffer
+		app.Stdout = &stdout
+		app.Stderr = &stderr
+
+		cmd := app.RootCmd()
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"auth", "login", "--cookies", cookiePath})
+
+		err := cmd.Execute()
+		if err == nil {
+			t.Fatal("expected auth login to fail with expired token, got nil")
+		}
+		if !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("expected error message to mention expired, got: %v", err)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package watch_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -740,5 +741,109 @@ func TestEngineConcurrentSinkDispatchAndTimeout(t *testing.T) {
 	}
 	if duration >= 1500*time.Millisecond {
 		t.Fatalf("expected dispatch to timeout quickly (~60ms), but took %v", duration)
+	}
+}
+
+func TestEngineFavoritesAuthExpiredPause(t *testing.T) {
+	// 1. Server returns HTTP 401 Unauthorized
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "fav_expired.db"))
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	client.SetSession("dummy-active-token")
+
+	eng := watch.NewEngine(st, client)
+
+	w := &store.Watch{
+		Type:   "favorites",
+		Name:   "my-favorites",
+		Target: "favorites",
+		Status: "active",
+	}
+	if err := st.AddWatch(w); err != nil {
+		t.Fatalf("failed to add watch: %v", err)
+	}
+
+	// 1. Run check on watch returning HTTP 401
+	_, err = eng.CheckWatch(context.Background(), w)
+	if err == nil {
+		t.Fatal("expected error on 401, got nil")
+	}
+
+	// 2. Verify watch was automatically paused in store
+	reloaded, err := st.GetWatch(w.Name)
+	if err != nil {
+		t.Fatalf("failed to reload watch: %v", err)
+	}
+	if reloaded.Status != "paused" {
+		t.Fatalf("expected watch status to be 'paused', got %q", reloaded.Status)
+	}
+
+	// 3. Verify event watch.paused was recorded with reason session_expired
+	events, err := st.ListEvents(w.ID, 10)
+	if err != nil {
+		t.Fatalf("failed to list events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].EventType != "watch.paused" {
+		t.Fatalf("expected event type 'watch.paused', got %q", events[0].EventType)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal([]byte(events[0].PayloadJSON), &payload)
+	if payload["reason"] != "session_expired" {
+		t.Fatalf("expected payload reason 'session_expired', got %v", payload["reason"])
+	}
+
+	// 4. Verify CheckAll skips this paused watch
+	results, err := eng.CheckAll(context.Background())
+	if err != nil {
+		t.Fatalf("CheckAll failed: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected CheckAll to skip paused watch, got %d results", len(results))
+	}
+
+	// 5. Test preventive check with expired JWT claim
+	pastExp := time.Now().Add(-1 * time.Hour).Unix()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	claims, _ := json.Marshal(map[string]any{"exp": pastExp})
+	payloadB64 := base64.RawURLEncoding.EncodeToString(claims)
+	expiredJWT := fmt.Sprintf("%s.%s.sig", header, payloadB64)
+
+	client.SetSession(expiredJWT)
+	w2 := &store.Watch{
+		Type:   "favorites",
+		Name:   "my-favorites-2",
+		Target: "favorites",
+		Status: "active",
+	}
+	if err := st.AddWatch(w2); err != nil {
+		t.Fatalf("failed to add watch 2: %v", err)
+	}
+
+	_, err = eng.CheckWatch(context.Background(), w2)
+	if err == nil {
+		t.Fatal("expected error on expired jwt check, got nil")
+	}
+
+	reloaded2, err := st.GetWatch(w2.Name)
+	if err != nil {
+		t.Fatalf("failed to reload watch 2: %v", err)
+	}
+	if reloaded2.Status != "paused" {
+		t.Fatalf("expected watch 2 to be paused, got %q", reloaded2.Status)
 	}
 }
