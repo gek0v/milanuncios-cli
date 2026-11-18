@@ -2,8 +2,8 @@
 bin/
 dist/
 npm/bin/
-milanuncios
-docsgen
+/milanuncios
+/docsgen
 *.exe
 *.exe~
 *.dll

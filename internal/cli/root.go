@@ -152,6 +152,10 @@ func (a *App) setup(cmd *cobra.Command) error {
 		}
 	}
 
+	if baseURL := os.Getenv("MILANUNCIOS_BASE_URL"); baseURL != "" {
+		a.Client.BaseURL = baseURL
+	}
+
 	proxyStr := os.Getenv("MILANUNCIOS_PROXY")
 	if proxyStr == "" && a.Cfg.Proxy != "" {
 		proxyStr = a.Cfg.Proxy

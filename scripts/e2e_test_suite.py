@@ -17,12 +17,14 @@ verifying:
 Requirements: Python 3.8+ (zero external dependencies).
 """
 
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -294,6 +296,178 @@ class TestAdAndSearchValidation(MilanunciosCLITestCase):
         res = self.run_cli("ad", "favorite", "492817294")
         self.assertEqual(res.returncode, 3)
 
+    def test_32b_ad_schema_missing_category_flag_exit_code_2(self):
+        res = self.run_cli("ad", "schema")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("required flag", res.stderr.lower())
+
+    def test_32c_ad_create_missing_flags_exit_code_2(self):
+        res = self.run_cli("ad", "create")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("must provide ad spec", res.stderr.lower())
+
+    def test_32d_ad_create_conflicting_flags_exit_code_2(self):
+        res = self.run_cli("ad", "create", "--from-file", "dummy.json", "--spec", "{}")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("cannot specify both", res.stderr.lower())
+
+    def test_32e_ad_create_invalid_json_spec_exit_code_2(self):
+        res = self.run_cli("ad", "create", "--spec", "not-a-valid-json")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("invalid json ad spec", res.stderr.lower())
+
+    def test_32f_ad_create_validation_failure_exit_code_2(self):
+        invalid_spec = json.dumps({
+            "category_id": 0,
+            "title": "Short",
+            "description": "Short",
+            "price": 0,
+            "location": {"province": ""},
+        })
+        res = self.run_cli("ad", "create", "--spec", invalid_spec, "--dry-run", "--format", "json")
+        self.assertEqual(res.returncode, 2)
+        report = json.loads(res.stdout)
+        self.assertFalse(report.get("valid"))
+        self.assertTrue(len(report.get("errors", [])) >= 4)
+
+    def test_32g_ad_schema_with_mock_server(self):
+        server = self._start_mock_server()
+        try:
+            res = self.run_cli("ad", "schema", "--category", "11", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            schema = json.loads(res.stdout)
+            self.assertEqual(schema.get("category_id"), 11)
+            self.assertEqual(schema.get("$schema"), "http://json-schema.org/draft-07/schema#")
+            self.assertIn("title", schema.get("required", []))
+            self.assertIn("attributes", schema.get("properties", {}))
+
+            # Pretty format
+            res_pretty = self.run_cli("ad", "schema", "-c", "11", "--format", "pretty")
+            self.assertEqual(res_pretty.returncode, 0)
+            self.assertIn("Coches de segunda mano", res_pretty.stdout)
+            self.assertIn("fuel", res_pretty.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_32h_ad_create_with_mock_server_dry_run_success(self):
+        server = self._start_mock_server()
+        try:
+            valid_spec = json.dumps({
+                "category_id": 11,
+                "title": "Volkswagen Golf VII 2.0 TDI Advance",
+                "description": "Vehículo en impecable estado de conservación con libro de mantenimiento.",
+                "price": 13900.0,
+                "location": {
+                    "province": "Madrid",
+                    "municipality": "Alcobendas",
+                },
+                "attributes": {
+                    "fuel": "diesel",
+                    "transmission": "manual",
+                },
+            })
+            res = self.run_cli("ad", "create", "--spec", valid_spec, "--dry-run", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            report = json.loads(res.stdout)
+            self.assertTrue(report.get("valid"))
+            self.assertEqual(report.get("category_id"), 11)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_32i_ad_create_from_file_and_stdin(self):
+        server = self._start_mock_server()
+        try:
+            valid_spec = json.dumps({
+                "category_id": 11,
+                "title": "Bicicleta de carretera carbono profesional",
+                "description": "Bicicleta en perfecto estado con componentes Shimano 105 completos.",
+                "price": 850.0,
+                "location": {"province": "Barcelona"},
+            })
+            # From file
+            tmp_spec_file = Path(self.tmp_dir) / "test_ad.json"
+            tmp_spec_file.write_text(valid_spec, encoding="utf-8")
+            res_file = self.run_cli("ad", "create", "--from-file", str(tmp_spec_file), "--dry-run", "--format", "json")
+            self.assertEqual(res_file.returncode, 0)
+            rep_file = json.loads(res_file.stdout)
+            self.assertTrue(rep_file.get("valid"))
+
+            # From stdin
+            res_stdin = self.run_cli("ad", "create", "--from-file", "-", "--dry-run", "--format", "json", input_text=valid_spec)
+            self.assertEqual(res_stdin.returncode, 0)
+            rep_stdin = json.loads(res_stdin.stdout)
+            self.assertTrue(rep_stdin.get("valid"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_32j_ad_create_invalid_enum_suggestion(self):
+        server = self._start_mock_server()
+        try:
+            spec = json.dumps({
+                "category_id": 11,
+                "title": "BMW Serie 3 320d Pack M",
+                "description": "Vehículo en impecable estado de conservación siempre en garaje.",
+                "price": 18000.0,
+                "location": {"province": "Madrid"},
+                "attributes": {
+                    "fuel": "gasoil",
+                },
+            })
+            res = self.run_cli("ad", "create", "--spec", spec, "--dry-run", "--format", "json")
+            self.assertEqual(res.returncode, 2)
+            report = json.loads(res.stdout)
+            self.assertFalse(report.get("valid"))
+            errors = report.get("errors", [])
+            fuel_errors = [e for e in errors if e.get("field") == "attributes.fuel"]
+            self.assertEqual(len(fuel_errors), 1)
+            self.assertEqual(fuel_errors[0].get("suggestion"), "Change 'gasoil' to 'diesel'")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def _start_mock_server(self):
+        class _MockCategoryHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/api/v1/categories/11/filters":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "category_id": 11,
+                        "category_name": "Coches de segunda mano",
+                        "filters": [
+                            {
+                                "key": "fuel",
+                                "label": "Combustible",
+                                "type": "select",
+                                "options": ["diesel", "gasolina", "electrico", "hibrido", "hibrido_enchufable", "gas"],
+                            },
+                            {
+                                "key": "transmission",
+                                "label": "Cambio",
+                                "type": "select",
+                                "options": ["manual", "automatico"],
+                            },
+                        ],
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _MockCategoryHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.env["MILANUNCIOS_BASE_URL"] = f"http://127.0.0.1:{port}"
+        return server
+
 
 # ==============================================================================
 # 5. WATCH ENGINE & SQLITE PERSISTENCE (Tests 33 - 42)
@@ -511,7 +685,7 @@ class TestIOIntegrity(MilanunciosCLITestCase):
 # ==============================================================================
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (60 Tests)")
+    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (72 Tests)")
     print("=" * 70)
 
     suite = unittest.TestSuite()

@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"runtime"
 
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
+	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +27,8 @@ func (a *App) adCmd() *cobra.Command {
 		a.adOpenCmd(),
 		a.adFavoriteCmd(),
 		a.adUnfavoriteCmd(),
+		a.adSchemaCmd(),
+		a.adCreateCmd(),
 	)
 
 	return cmd
@@ -136,4 +143,110 @@ func openBrowser(rawURL string) error {
 		cmd = exec.Command("xdg-open", rawURL)
 	}
 	return cmd.Start()
+}
+
+func (a *App) adSchemaCmd() *cobra.Command {
+	var categoryID int
+
+	cmd := &cobra.Command{
+		Use:   "schema",
+		Short: "Inspect JSON Schema Draft-07 publication contract for a category",
+		Long: `Retrieve the JSON Schema Draft-07 publication contract for a category.
+
+Maps required fields, types, constraints and dynamic taxonomy filters under 'attributes'.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if categoryID <= 0 {
+				return output.Usagef("--category ID must be greater than 0")
+			}
+
+			schema, err := a.Client.GetCategorySchema(cmd.Context(), categoryID)
+			if err != nil {
+				return err
+			}
+
+			return a.Printer.Print(schema)
+		},
+	}
+
+	cmd.Flags().IntVarP(&categoryID, "category", "c", 0, "target category ID (required)")
+	_ = cmd.MarkFlagRequired("category")
+
+	return cmd
+}
+
+func (a *App) adCreateCmd() *cobra.Command {
+	var (
+		fromFile   string
+		inlineSpec string
+		dryRun     bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Validate or publish an ad listing from declarative specification",
+		Long: `Create or validate an ad listing using a declarative AdSpec JSON document.
+
+Supports file input (--from-file <path>), stdin (--from-file -), or inline payload (--spec '<json>').
+By default, --dry-run is true to simulate validation without creating the listing.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if fromFile == "" && inlineSpec == "" {
+				return output.Usagef("must provide ad spec via --from-file or --spec")
+			}
+			if fromFile != "" && inlineSpec != "" {
+				return output.Usagef("cannot specify both --from-file and --spec")
+			}
+
+			var specBytes []byte
+			if inlineSpec != "" {
+				specBytes = []byte(inlineSpec)
+			} else if fromFile == "-" {
+				var err error
+				specBytes, err = io.ReadAll(cmd.InOrStdin())
+				if err != nil {
+					return fmt.Errorf("reading stdin: %w", err)
+				}
+			} else {
+				var err error
+				specBytes, err = os.ReadFile(fromFile)
+				if err != nil {
+					return output.Usagef("reading ad spec file %q: %v", fromFile, err)
+				}
+			}
+
+			if len(bytes.TrimSpace(specBytes)) == 0 {
+				return output.Usagef("ad spec payload is empty")
+			}
+
+			var spec milanuncios.AdSpec
+			if err := json.Unmarshal(specBytes, &spec); err != nil {
+				return output.Usagef("invalid JSON ad spec: %v", err)
+			}
+
+			report, err := a.Client.ValidateAdSpec(cmd.Context(), &spec)
+			if err != nil {
+				return err
+			}
+
+			if err := a.Printer.Print(report); err != nil {
+				return err
+			}
+
+			if !report.Valid {
+				return output.Usagef("ad validation failed with %d error(s)", len(report.Errors))
+			}
+
+			if dryRun {
+				return nil
+			}
+
+			fmt.Fprintln(a.Stderr, "Notice: dry-run validation succeeded. Real ad publishing endpoint will activate in Slice 13.")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&fromFile, "from-file", "", "path to ad spec JSON file or '-' for stdin")
+	cmd.Flags().StringVar(&inlineSpec, "spec", "", "inline ad spec JSON payload")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "simulate validation without creating listing")
+
+	return cmd
 }

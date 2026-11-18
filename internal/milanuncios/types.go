@@ -454,3 +454,218 @@ func (r *ConversationStartResult) Pretty(w io.Writer, color bool) {
 		fmt.Fprintf(w, "[Tú]: %s\n", r.Text)
 	}
 }
+
+// AdSpec defines the full declarative specification for an ad listing.
+type AdSpec struct {
+	ClientRequestID string                 `json:"client_request_id,omitempty"`
+	CategoryID      int                    `json:"category_id"`
+	Title           string                 `json:"title"`
+	Description     string                 `json:"description"`
+	Price           float64                `json:"price"`
+	Negotiable      bool                   `json:"negotiable,omitempty"`
+	Location        AdLocationSpec         `json:"location"`
+	Contact         AdContactSpec          `json:"contact,omitempty"`
+	Shipping        AdShippingSpec         `json:"shipping,omitempty"`
+	Photos          []string               `json:"photos,omitempty"`
+	Attributes      map[string]interface{} `json:"attributes,omitempty"`
+}
+
+type AdLocationSpec struct {
+	Province     string `json:"province"`
+	Municipality string `json:"municipality,omitempty"`
+	PostalCode   string `json:"postal_code,omitempty"`
+}
+
+type AdContactSpec struct {
+	AllowPhone bool   `json:"allow_phone"`
+	AllowChat  bool   `json:"allow_chat"`
+	Phone      string `json:"phone,omitempty"`
+	Email      string `json:"email,omitempty"`
+}
+
+type AdShippingSpec struct {
+	Allowed  bool    `json:"allowed"`
+	WeightKG float64 `json:"weight_kg,omitempty"`
+}
+
+// ValidationReport represents the diagnostics returned in --dry-run and validation failures.
+type ValidationReport struct {
+	Valid                    bool              `json:"valid"`
+	CategoryID               int               `json:"category_id,omitempty"`
+	PhotosDetected           int               `json:"photos_detected,omitempty"`
+	EstimatedUploadSizeBytes int64             `json:"estimated_upload_size_bytes,omitempty"`
+	Errors                   []ValidationError `json:"errors,omitempty"`
+	Warnings                 []string          `json:"warnings,omitempty"`
+	Message                  string            `json:"message,omitempty"`
+}
+
+type ValidationError struct {
+	Field         string      `json:"field"`
+	Code          string      `json:"code"`
+	Message       string      `json:"message"`
+	Actual        interface{} `json:"actual,omitempty"`
+	Expected      string      `json:"expected,omitempty"`
+	AllowedValues []string    `json:"allowed_values,omitempty"`
+	Suggestion    string      `json:"suggestion,omitempty"`
+}
+
+// Pretty renders the validation report in a clean human-readable terminal format.
+func (r *ValidationReport) Pretty(w io.Writer, color bool) {
+	if r == nil {
+		return
+	}
+
+	if r.Valid {
+		if color {
+			fmt.Fprintln(w, "\x1b[32m✔ Validation successful!\x1b[0m")
+		} else {
+			fmt.Fprintln(w, "✔ Validation successful!")
+		}
+		if r.CategoryID > 0 {
+			fmt.Fprintf(w, "Category ID: %d\n", r.CategoryID)
+		}
+		if r.PhotosDetected > 0 {
+			sizeStr := formatBytes(r.EstimatedUploadSizeBytes)
+			fmt.Fprintf(w, "Photos detected: %d (estimated upload size: %s)\n", r.PhotosDetected, sizeStr)
+		}
+		if r.Message != "" {
+			fmt.Fprintf(w, "Message: %s\n", r.Message)
+		}
+		if len(r.Warnings) > 0 {
+			fmt.Fprintln(w, "\nWarnings:")
+			for _, warn := range r.Warnings {
+				if color {
+					fmt.Fprintf(w, "  \x1b[33m⚠ %s\x1b[0m\n", warn)
+				} else {
+					fmt.Fprintf(w, "  ⚠ %s\n", warn)
+				}
+			}
+		}
+		return
+	}
+
+	if color {
+		fmt.Fprintf(w, "\x1b[31m✖ Validation failed with %d error(s):\x1b[0m\n\n", len(r.Errors))
+	} else {
+		fmt.Fprintf(w, "✖ Validation failed with %d error(s):\n\n", len(r.Errors))
+	}
+
+	for _, err := range r.Errors {
+		if color {
+			fmt.Fprintf(w, "  \x1b[1m[%s]\x1b[0m \x1b[31m%s\x1b[0m: %s\n", err.Field, err.Code, err.Message)
+		} else {
+			fmt.Fprintf(w, "  [%s] %s: %s\n", err.Field, err.Code, err.Message)
+		}
+		if err.Actual != nil {
+			fmt.Fprintf(w, "    Actual:     %v\n", err.Actual)
+		}
+		if err.Expected != "" {
+			fmt.Fprintf(w, "    Expected:   %s\n", err.Expected)
+		}
+		if len(err.AllowedValues) > 0 {
+			fmt.Fprintf(w, "    Allowed:    %s\n", strings.Join(err.AllowedValues, ", "))
+		}
+		if err.Suggestion != "" {
+			if color {
+				fmt.Fprintf(w, "    \x1b[33mSuggestion: %s\x1b[0m\n", err.Suggestion)
+			} else {
+				fmt.Fprintf(w, "    Suggestion: %s\n", err.Suggestion)
+			}
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(r.Warnings) > 0 {
+		fmt.Fprintln(w, "Warnings:")
+		for _, warn := range r.Warnings {
+			if color {
+				fmt.Fprintf(w, "  \x1b[33m⚠ %s\x1b[0m\n", warn)
+			} else {
+				fmt.Fprintf(w, "  ⚠ %s\n", warn)
+			}
+		}
+	}
+}
+
+func formatBytes(b int64) string {
+	if b <= 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// CategoryJSONSchema represents a Draft-07 JSON Schema publication contract.
+type CategoryJSONSchema struct {
+	Schema       string                 `json:"$schema"`
+	Title        string                 `json:"title"`
+	CategoryID   int                    `json:"category_id"`
+	CategoryName string                 `json:"category_name,omitempty"`
+	Type         string                 `json:"type"`
+	Required     []string               `json:"required"`
+	Properties   map[string]interface{} `json:"properties"`
+	Filters      []FilterDefinition     `json:"-"`
+}
+
+// Pretty prints the JSON schema contract in human-readable tabular form.
+func (s *CategoryJSONSchema) Pretty(w io.Writer, color bool) {
+	if s == nil {
+		return
+	}
+	name := s.CategoryName
+	if name == "" {
+		name = fmt.Sprintf("Category %d", s.CategoryID)
+	}
+	if color {
+		fmt.Fprintf(w, "\x1b[1mCategory Schema: %s (ID: %d)\x1b[0m\n", name, s.CategoryID)
+	} else {
+		fmt.Fprintf(w, "Category Schema: %s (ID: %d)\n", name, s.CategoryID)
+	}
+	fmt.Fprintln(w, "Draft-07 JSON Schema Specification")
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "Required Core Fields:")
+	reqHeader := []string{"FIELD", "TYPE", "CONSTRAINTS", "REQUIRED"}
+	reqRows := [][]string{
+		{"category_id", "integer", fmt.Sprintf("Must match %d", s.CategoryID), "YES"},
+		{"title", "string", "10-100 characters", "YES"},
+		{"description", "string", "20-5000 characters", "YES"},
+		{"price", "number", ">= 1.0 €", "YES"},
+		{"location.province", "string", "Spanish province name", "YES"},
+		{"photos", "array[string]", "Local file path, HTTP(S) URL, or Base64", "no"},
+		{"contact", "object", "allow_chat (bool), allow_phone (bool), phone, email", "no"},
+		{"shipping", "object", "allowed (bool), weight_kg (number)", "no"},
+	}
+	output.Table(w, color, reqHeader, reqRows)
+
+	if len(s.Filters) > 0 {
+		fmt.Fprintf(w, "\nCategory-Specific Dynamic Attributes (%d):\n", len(s.Filters))
+		attrHeader := []string{"KEY", "LABEL", "TYPE", "OPTIONS / ENUMS"}
+		var attrRows [][]string
+		for _, f := range s.Filters {
+			opts := strings.Join(f.Options, ", ")
+			if opts == "" {
+				opts = "-"
+			}
+			attrRows = append(attrRows, []string{
+				f.Key,
+				f.Label,
+				f.Type,
+				output.Truncate(opts, 45),
+			})
+		}
+		output.Table(w, color, attrHeader, attrRows)
+	} else {
+		fmt.Fprintln(w, "\nNo category-specific attributes required for this category.")
+	}
+
+	fmt.Fprintln(w, "\nValidate your ad specification with: milanuncios ad create --from-file <spec.json> --dry-run")
+}
