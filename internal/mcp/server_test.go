@@ -164,6 +164,7 @@ func TestMCPServerLifecycle(t *testing.T) {
 		`{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"milanuncios_ad_favorite","arguments":{"ad_id":"555123","action":"favorite"}}}`,
 		`{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"milanuncios_ad_update","arguments":{"ad_id":"555123","patch":{"price":60}}}}`,
 		`{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"milanuncios_ad_delete","arguments":{"ad_id":"555123","reason":"sold_milanuncios","feedback":"Vendido rapido"}}}`,
+		`{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"milanuncios_evaluate","arguments":{"ad_id":"555123","include_comparables":true}}}`,
 	}
 
 	input := strings.Join(requests, "\n") + "\n"
@@ -178,8 +179,8 @@ func TestMCPServerLifecycle(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) < 16 {
-		t.Fatalf("expected at least 16 response lines, got %d (output: %s)", len(lines), out.String())
+	if len(lines) < 17 {
+		t.Fatalf("expected at least 17 response lines, got %d (output: %s)", len(lines), out.String())
 	}
 
 	// Helper to find response by ID
@@ -227,6 +228,7 @@ func TestMCPServerLifecycle(t *testing.T) {
 		"milanuncios_watch_list",
 		"milanuncios_watch_check",
 		"milanuncios_watch_events",
+		"milanuncios_evaluate",
 	}
 
 	toolMap := make(map[string]map[string]any)
@@ -347,6 +349,13 @@ func TestMCPServerLifecycle(t *testing.T) {
 	text16 := resp16["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text16, "sold_milanuncios") {
 		t.Fatalf("expected ad_delete to return deletion result, got: %s", text16)
+	}
+
+	// Verify id: 17 - milanuncios_evaluate
+	resp17 := findResp(17)
+	text17 := resp17["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text17, "555123") || !strings.Contains(text17, "deal_score") {
+		t.Fatalf("expected milanuncios_evaluate to return evaluation report with deal_score, got: %s", text17)
 	}
 }
 
@@ -513,5 +522,121 @@ func TestMCPFavoriteTagValidation(t *testing.T) {
 	text3 := resp3["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text3, "492817294") || !strings.Contains(text3, "seguimiento") {
 		t.Fatalf("expected annotation with extracted ID 492817294, got: %s", text3)
+	}
+}
+
+func TestMCPEvaluateTool(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/api/v1/ads/492817294") {
+			ad := milanuncios.AdItem{
+				ID:       "492817294",
+				Title:    "Cannondale Topstone",
+				Price:    950,
+				Category: 1102,
+				URL:      "https://www.milanuncios.com/bicicletas/cannondale-492817294.htm",
+			}
+			_ = json.NewEncoder(w).Encode(ad)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/api/v1/search") {
+			res := milanuncios.SearchResult{
+				Items: []milanuncios.AdItem{
+					{ID: "c1", Title: "Cannondale Topstone 1", Price: 1200},
+					{ID: "c2", Title: "Cannondale Topstone 2", Price: 1250},
+					{ID: "c3", Title: "Cannondale Topstone 3", Price: 1150},
+				},
+				Total: 3,
+			}
+			_ = json.NewEncoder(w).Encode(res)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error": "not found"}`))
+	}))
+	defer ts.Close()
+
+	tmpDir := t.TempDir()
+	st, err := store.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer st.Close()
+
+	client := milanuncios.NewClient("test")
+	client.BaseURL = ts.URL
+	eng := watch.NewEngine(st, client)
+
+	requests := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		// 1. Missing ad_id
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"milanuncios_evaluate","arguments":{}}}`,
+		// 2. Valid evaluation by ID with comparables
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"milanuncios_evaluate","arguments":{"ad_id":"492817294","include_comparables":true}}}`,
+		// 3. Valid evaluation by URL
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"milanuncios_evaluate","arguments":{"ad_id":"https://www.milanuncios.com/bicicletas/cannondale-492817294.htm"}}}`,
+		// 4. Not found ad
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"milanuncios_evaluate","arguments":{"ad_id":"888888888"}}}`,
+	}
+
+	input := strings.Join(requests, "\n") + "\n"
+	var in, out, errOut bytes.Buffer
+	in.WriteString(input)
+
+	srv := mcp.NewServer("0.1.0-test", client, st, eng, &in, &out, &errOut)
+	if err := srv.Run(context.Background()); err != nil {
+		t.Fatalf("mcp server failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	findResp := func(id int) map[string]any {
+		for _, l := range lines {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(l), &m); err == nil {
+				if idVal, ok := m["id"].(float64); ok && int(idVal) == id {
+					return m
+				}
+			}
+		}
+		return nil
+	}
+
+	// 1. Missing ad_id -> isError
+	resp2 := findResp(2)
+	res2Map, _ := resp2["result"].(map[string]any)
+	if isErr, _ := res2Map["isError"].(bool); !isErr {
+		t.Fatalf("expected isError for missing ad_id, got: %+v", res2Map)
+	}
+
+	// 2. Valid evaluation by ID
+	resp3 := findResp(3)
+	res3Map, _ := resp3["result"].(map[string]any)
+	if isErr, _ := res3Map["isError"].(bool); isErr {
+		t.Fatalf("expected success for valid evaluation, got error: %+v", res3Map)
+	}
+	text3 := res3Map["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text3, `"ad_id": "492817294"`) || !strings.Contains(text3, `"deal_score"`) {
+		t.Fatalf("expected valid JSON report with deal_score, got: %s", text3)
+	}
+	if !strings.Contains(text3, `"comparables"`) {
+		t.Fatalf("expected comparables in report, got: %s", text3)
+	}
+
+	// 3. Valid evaluation by URL
+	resp4 := findResp(4)
+	res4Map, _ := resp4["result"].(map[string]any)
+	if isErr, _ := res4Map["isError"].(bool); isErr {
+		t.Fatalf("expected success for evaluation by URL, got error: %+v", res4Map)
+	}
+	text4 := res4Map["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text4, `"ad_id": "492817294"`) {
+		t.Fatalf("expected evaluation to extract ad ID from URL, got: %s", text4)
+	}
+
+	// 4. Not found ad -> isError
+	resp5 := findResp(5)
+	res5Map, _ := resp5["result"].(map[string]any)
+	if isErr, _ := res5Map["isError"].(bool); !isErr {
+		t.Fatalf("expected isError for not found ad, got: %+v", res5Map)
 	}
 }

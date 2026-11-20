@@ -99,6 +99,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.mcpCmd(),
 		a.skillsCmd(),
 		a.favoriteCmd(),
+		a.evaluateCmd(),
 	)
 
 	return root

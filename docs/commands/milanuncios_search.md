@@ -21,6 +21,7 @@ milanuncios search [keywords] [flags]
   -h, --help                 help for search
       --limit int            maximum number of results per page (default 20)
       --max-price float      maximum price in EUR
+      --min-deal-score int   filter results by minimum Deal Score (0-100)
       --min-price float      minimum price in EUR
       --next string          pagination cursor for the next page
       --province string      filter by Spanish province (e.g. Madrid, Barcelona)

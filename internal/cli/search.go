@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 
+	"github.com/gek0v/milanuncios-cli/internal/eval"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/spf13/cobra"
@@ -10,14 +11,15 @@ import (
 
 func (a *App) searchCmd() *cobra.Command {
 	var (
-		minPrice float64
-		maxPrice float64
-		province string
-		category int
-		sort     string
-		limit    int
-		next     string
-		filters  []string
+		minPrice     float64
+		maxPrice     float64
+		province     string
+		category     int
+		sort         string
+		limit        int
+		next         string
+		filters      []string
+		minDealScore int
 	)
 
 	cmd := &cobra.Command{
@@ -45,6 +47,10 @@ or formatted in a clean table with --format pretty.`,
 				}
 			}
 
+			if minDealScore < 0 || minDealScore > 100 {
+				return output.Usagef("--min-deal-score must be between 0 and 100 (got %d)", minDealScore)
+			}
+
 			filterMap, err := parseFilterFlags(filters)
 			if err != nil {
 				return err
@@ -67,6 +73,28 @@ or formatted in a clean table with --format pretty.`,
 				return err
 			}
 
+			if minDealScore > 0 && res != nil && len(res.Items) > 0 {
+				var rawPrices []float64
+				for _, it := range res.Items {
+					if it.Price > 0 {
+						rawPrices = append(rawPrices, it.Price)
+					}
+				}
+				cleanPrices, _ := eval.FilterIQROutliers(rawPrices)
+				median := eval.CalculateMedian(cleanPrices)
+				sampleSize := len(cleanPrices)
+
+				filtered := make([]milanuncios.AdItem, 0)
+				for _, it := range res.Items {
+					score, _ := eval.CalculateDealScore(it.Price, median, sampleSize)
+					if score >= minDealScore {
+						filtered = append(filtered, it)
+					}
+				}
+				res.Items = filtered
+				res.Total = len(filtered)
+			}
+
 			return a.Printer.Print(res)
 		},
 	}
@@ -80,6 +108,7 @@ or formatted in a clean table with --format pretty.`,
 	flags.IntVar(&limit, "limit", 20, "maximum number of results per page")
 	flags.StringVar(&next, "next", "", "pagination cursor for the next page")
 	flags.StringArrayVar(&filters, "filter", nil, "category-specific filter in key=value format (repeatable)")
+	flags.IntVar(&minDealScore, "min-deal-score", 0, "filter results by minimum Deal Score (0-100)")
 
 	_ = cmd.RegisterFlagCompletionFunc("sort", cobra.FixedCompletions([]string{"relevance", "newest", "price_asc", "price_desc"}, cobra.ShellCompDirectiveNoFileComp))
 

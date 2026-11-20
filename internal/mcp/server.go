@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gek0v/milanuncios-cli/internal/eval"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/store"
 	"github.com/gek0v/milanuncios-cli/internal/watch"
@@ -520,6 +521,25 @@ func (s *Server) getToolDefinitions() []toolInfo {
 				"required": []string{"conversation_id", "text"},
 			},
 		},
+		{
+			Name:        "milanuncios_evaluate",
+			Description: "Evaluate the fair market price and calculate the Deal Score (0-100) of an ad listing. Uses robust non-parametric statistical benchmarks (IQR outlier cleaning and median comparison) to detect real bargains without AI hallucinations.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ad_id": map[string]any{
+						"type":        "string",
+						"description": "Ad ID or full Milanuncios URL to evaluate",
+					},
+					"include_comparables": map[string]any{
+						"type":        "boolean",
+						"default":     false,
+						"description": "Include top comparable listings in the output",
+					},
+				},
+				"required": []string{"ad_id"},
+			},
+		},
 	}
 }
 
@@ -976,6 +996,29 @@ func (s *Server) executeTool(ctx context.Context, name string, args map[string]a
 			return nil, err
 		}
 		b, _ := json.MarshalIndent(msg, "", "  ")
+		return &toolCallResult{
+			Content: []contentItem{{Type: "text", Text: string(b)}},
+		}, nil
+
+	case "milanuncios_evaluate":
+		adID := normalizeString(args["ad_id"])
+		if adID == "" {
+			return nil, fmt.Errorf("ad_id is required")
+		}
+		var includeComparables bool
+		if inc, ok := args["include_comparables"].(bool); ok {
+			includeComparables = inc
+		} else if sVal, ok := args["include_comparables"].(string); ok {
+			if strings.ToLower(sVal) == "true" || sVal == "1" {
+				includeComparables = true
+			}
+		}
+		evaluator := eval.NewEvaluator(s.Client, s.Store)
+		report, err := evaluator.EvaluateAd(ctx, adID, includeComparables)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.MarshalIndent(report, "", "  ")
 		return &toolCallResult{
 			Content: []contentItem{{Type: "text", Text: string(b)}},
 		}, nil

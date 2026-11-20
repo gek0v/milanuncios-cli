@@ -24,6 +24,7 @@ Inspect and interact with Milanuncios ads
 * [milanuncios](milanuncios.md)	 - Terminal client for the Milanuncios marketplace
 * [milanuncios ad create](milanuncios_ad_create.md)	 - Validate or publish an ad listing from declarative specification
 * [milanuncios ad delete](milanuncios_ad_delete.md)	 - Delete or withdraw an active ad listing
+* [milanuncios ad evaluate](milanuncios_ad_evaluate.md)	 - Evaluate the fair market price and calculate Deal Score for an ad
 * [milanuncios ad favorite](milanuncios_ad_favorite.md)	 - Add an ad to your account favorites, or manage local annotations
 * [milanuncios ad images](milanuncios_ad_images.md)	 - List all photo URLs for an ad
 * [milanuncios ad open](milanuncios_ad_open.md)	 - Open an ad listing in your default browser

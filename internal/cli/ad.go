@@ -36,6 +36,7 @@ func (a *App) adCmd() *cobra.Command {
 		a.adCreateCmd(),
 		a.adUpdateCmd(),
 		a.adDeleteCmd(),
+		a.evaluateCmd(),
 	)
 
 	return cmd
