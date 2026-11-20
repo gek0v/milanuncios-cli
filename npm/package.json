@@ -25,6 +25,9 @@
   ],
   "author": "milanuncios-cli contributors",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "bugs": {
     "url": "https://github.com/gek0v/milanuncios-cli/issues"
   },
