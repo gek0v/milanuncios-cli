@@ -807,6 +807,11 @@ func (c *Client) ListConversations(ctx context.Context) (ConversationList, error
 	return list, nil
 }
 
+// ListChats is an alias for ListConversations for interactive chat management.
+func (c *Client) ListChats(ctx context.Context) (ConversationList, error) {
+	return c.ListConversations(ctx)
+}
+
 // GetConversation retrieves the message history for a specific conversation ID.
 func (c *Client) GetConversation(ctx context.Context, id string) (*ConversationDetails, error) {
 	trimmed := strings.TrimSpace(id)
@@ -818,6 +823,11 @@ func (c *Client) GetConversation(ctx context.Context, id string) (*ConversationD
 		return nil, err
 	}
 	return &details, nil
+}
+
+// GetChat is an alias for GetConversation for interactive chat management.
+func (c *Client) GetChat(ctx context.Context, id string) (*ConversationDetails, error) {
+	return c.GetConversation(ctx, id)
 }
 
 // SendMessage sends a text message to a conversation thread.

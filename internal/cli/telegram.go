@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gek0v/milanuncios-cli/internal/config"
+	"github.com/gek0v/milanuncios-cli/internal/eval"
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/gek0v/milanuncios-cli/internal/telegram"
 	"github.com/spf13/cobra"
@@ -33,6 +35,32 @@ func (r *TelegramTestResult) Pretty(w io.Writer, color bool) {
 	} else {
 		fmt.Fprintf(w, "Status: %s (No allowed_chat_ids configured, ping skipped)\n", r.Status)
 	}
+}
+
+// TelegramSetupResult represents the result of the telegram setup command.
+type TelegramSetupResult struct {
+	Bot            *telegram.User `json:"bot"`
+	ChatID         int64          `json:"chat_id"`
+	AllowedChatIDs []int64        `json:"allowed_chat_ids"`
+	Confirmed      bool           `json:"confirmed"`
+	Status         string         `json:"status"`
+}
+
+// Pretty outputs human-readable status for telegram setup.
+func (r *TelegramSetupResult) Pretty(w io.Writer, color bool) {
+	username := r.Bot.Username
+	if username == "" {
+		username = "sin username"
+	}
+	fmt.Fprintf(w, "Telegram Bot: @%s (%s, ID: %d)\n", username, r.Bot.FirstName, r.Bot.ID)
+	fmt.Fprintf(w, "Chat ID: %d (Whitelisted in config.toml)\n", r.ChatID)
+	if len(r.AllowedChatIDs) > 1 {
+		fmt.Fprintf(w, "Allowed Chat IDs: %v\n", r.AllowedChatIDs)
+	}
+	if r.Confirmed {
+		fmt.Fprintf(w, "Confirmation: Sent successfully\n")
+	}
+	fmt.Fprintf(w, "Status: %s\n", r.Status)
 }
 
 func (a *App) getTelegramBotToken() string {
@@ -74,6 +102,7 @@ test connectivity, and handle swipe-to-reply messaging.`,
 	cmd.AddCommand(
 		a.telegramRunCmd(),
 		a.telegramTestCmd(),
+		a.telegramSetupCmd(),
 	)
 
 	return cmd
@@ -110,7 +139,8 @@ swipe-to-reply responses back to Milanuncios conversations.`,
 				AllowedChatIDs: a.Cfg.Telegram.AllowedChatIDs,
 				Stderr:         a.Stderr,
 			}
-			d := telegram.NewDaemon(tgClient, a.Client, st, daemonCfg)
+			evaluator := eval.NewEvaluator(a.Client, st)
+			d := telegram.NewDaemon(tgClient, a.Client, st, daemonCfg, evaluator)
 
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -174,6 +204,95 @@ a test ping message if allowed_chat_ids are configured.`,
 			return a.Printer.Print(res)
 		},
 	}
+
+	return cmd
+}
+
+func (a *App) telegramSetupCmd() *cobra.Command {
+	var (
+		tokenFlag  string
+		chatIDFlag int64
+	)
+
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Configure Telegram bot token and allowed chat ID",
+		Long: `Configure Telegram bot credentials and chat whitelist.
+Validates the token with Telegram Bot API, saves the bot token in credentials.toml,
+saves the chat ID in config.toml, and sends a confirmation test message.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			token := strings.TrimSpace(tokenFlag)
+			if token == "" {
+				token = a.getTelegramBotToken()
+			}
+			if token == "" {
+				return output.Usagef("telegram bot token is required (--token or MILANUNCIOS_TELEGRAM_TOKEN)")
+			}
+
+			if chatIDFlag == 0 {
+				return output.Usagef("telegram chat ID is required (--chat-id)")
+			}
+
+			tgClient := a.newTelegramClient(token)
+			user, err := tgClient.GetMe(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("validating telegram bot token: %w", err)
+			}
+
+			// Save token in credentials.toml
+			creds, err := config.LoadCredentials(a.Paths.CredentialsFile)
+			if err != nil {
+				return fmt.Errorf("loading credentials: %w", err)
+			}
+			creds.Telegram.BotToken = token
+			if err := config.SaveCredentials(a.Paths.CredentialsFile, creds); err != nil {
+				return fmt.Errorf("saving credentials: %w", err)
+			}
+
+			// Save chat ID in config.toml
+			cfg, err := config.Load(a.Paths.ConfigFile)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			cfg.Telegram.Enabled = true
+			alreadyPresent := false
+			for _, id := range cfg.Telegram.AllowedChatIDs {
+				if id == chatIDFlag {
+					alreadyPresent = true
+					break
+				}
+			}
+			if !alreadyPresent {
+				cfg.Telegram.AllowedChatIDs = append(cfg.Telegram.AllowedChatIDs, chatIDFlag)
+			}
+			if err := config.Save(a.Paths.ConfigFile, cfg); err != nil {
+				return fmt.Errorf("saving config: %w", err)
+			}
+			a.Cfg = cfg
+
+			// Send confirmation message to Telegram chat
+			confirmText := fmt.Sprintf("🎉 <b>milanuncios-cli</b>: ¡Bot configurado con éxito!\nBot: @%s (ID: %d)\nChat ID autorizado: %d", user.Username, user.ID, chatIDFlag)
+			_, err = tgClient.SendMessage(cmd.Context(), chatIDFlag, confirmText, &telegram.SendMessageOptions{
+				ParseMode: "HTML",
+			})
+			if err != nil {
+				return fmt.Errorf("sending confirmation message to chat %d: %w", chatIDFlag, err)
+			}
+
+			res := &TelegramSetupResult{
+				Bot:            user,
+				ChatID:         chatIDFlag,
+				AllowedChatIDs: cfg.Telegram.AllowedChatIDs,
+				Confirmed:      true,
+				Status:         "configured",
+			}
+
+			return a.Printer.Print(res)
+		},
+	}
+
+	cmd.Flags().StringVar(&tokenFlag, "token", "", "Telegram bot API token")
+	cmd.Flags().Int64Var(&chatIDFlag, "chat-id", 0, "Telegram chat ID to whitelist and notify")
 
 	return cmd
 }

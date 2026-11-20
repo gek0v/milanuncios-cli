@@ -28,5 +28,6 @@ test connectivity, and handle swipe-to-reply messaging.
 
 * [milanuncios](milanuncios.md)	 - Terminal client for the Milanuncios marketplace
 * [milanuncios telegram run](milanuncios_telegram_run.md)	 - Run the inbound Telegram long-polling daemon in foreground
+* [milanuncios telegram setup](milanuncios_telegram_setup.md)	 - Configure Telegram bot token and allowed chat ID
 * [milanuncios telegram test](milanuncios_telegram_test.md)	 - Test Telegram Bot token and connection
 

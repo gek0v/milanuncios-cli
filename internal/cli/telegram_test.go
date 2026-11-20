@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gek0v/milanuncios-cli/internal/cli"
+	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/store"
 )
 
@@ -654,5 +655,192 @@ func TestTelegramRun_UnauthorizedChatID(t *testing.T) {
 
 	if !strings.Contains(stderr.String(), "[telegram] ignoring message from unauthorized chat_id 999999") {
 		t.Errorf("expected warning in stderr about unauthorized chat_id, got: %s", stderr.String())
+	}
+}
+
+func TestTelegramSetup_Success(t *testing.T) {
+	var sentToChat atomic.Int64
+
+	tgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/botvalid-token/getMe":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": map[string]any{
+					"id":         987654321,
+					"is_bot":     true,
+					"first_name": "Setup Bot",
+					"username":   "setup_test_bot",
+				},
+			})
+		case "/botvalid-token/sendMessage":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if chatID, ok := body["chat_id"].(float64); ok {
+				sentToChat.Store(int64(chatID))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": map[string]any{
+					"message_id": 999,
+					"date":       1700000000,
+					"chat":       map[string]any{"id": 555123},
+					"text":       "confirmation",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer tgServer.Close()
+
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "config.toml")
+	credsFile := filepath.Join(dir, "credentials.toml")
+	stateDB := filepath.Join(dir, "milanuncios.db")
+
+	t.Setenv("MILANUNCIOS_CONFIG", configFile)
+	t.Setenv("MILANUNCIOS_CREDENTIALS_FILE", credsFile)
+	t.Setenv("MILANUNCIOS_STATE_DB", stateDB)
+	t.Setenv("MILANUNCIOS_TELEGRAM_BASE_URL", tgServer.URL)
+	t.Setenv("MILANUNCIOS_TELEGRAM_TOKEN", "")
+
+	app := cli.NewApp("test")
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"telegram", "setup", "--token", "valid-token", "--chat-id", "555123", "--format", "json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("telegram setup failed: %v", err)
+	}
+
+	// Verify sent confirmation message
+	if sentToChat.Load() != 555123 {
+		t.Errorf("expected confirmation to chat 555123, got %d", sentToChat.Load())
+	}
+
+	// Verify JSON output
+	var res cli.TelegramSetupResult
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode setup json output: %v, raw: %s", err, stdout.String())
+	}
+	if !res.Confirmed || res.Status != "configured" {
+		t.Errorf("unexpected setup result: %+v", res)
+	}
+	if res.ChatID != 555123 {
+		t.Errorf("expected chat_id 555123, got %d", res.ChatID)
+	}
+	if res.Bot == nil || res.Bot.Username != "setup_test_bot" {
+		t.Errorf("unexpected bot info in setup result: %+v", res.Bot)
+	}
+
+	// Verify credentials.toml was written
+	creds, err := config.LoadCredentials(credsFile)
+	if err != nil {
+		t.Fatalf("failed to load credentials file: %v", err)
+	}
+	if creds.Telegram.BotToken != "valid-token" {
+		t.Errorf("expected bot_token 'valid-token' in credentials, got %q", creds.Telegram.BotToken)
+	}
+
+	// Verify config.toml was written
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config file: %v", err)
+	}
+	if !cfg.Telegram.Enabled {
+		t.Errorf("expected telegram.enabled = true in config")
+	}
+	if len(cfg.Telegram.AllowedChatIDs) != 1 || cfg.Telegram.AllowedChatIDs[0] != 555123 {
+		t.Errorf("expected allowed_chat_ids = [555123], got %v", cfg.Telegram.AllowedChatIDs)
+	}
+}
+
+func TestTelegramSetup_Pretty(t *testing.T) {
+	tgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/botvalid-token/getMe":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": map[string]any{
+					"id":         987654321,
+					"is_bot":     true,
+					"first_name": "Setup Bot",
+					"username":   "setup_test_bot",
+				},
+			})
+		case "/botvalid-token/sendMessage":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"result": map[string]any{
+					"message_id": 999,
+					"date":       1700000000,
+					"chat":       map[string]any{"id": 555123},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer tgServer.Close()
+
+	dir := t.TempDir()
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(dir, "config.toml"))
+	t.Setenv("MILANUNCIOS_CREDENTIALS_FILE", filepath.Join(dir, "credentials.toml"))
+	t.Setenv("MILANUNCIOS_STATE_DB", filepath.Join(dir, "milanuncios.db"))
+	t.Setenv("MILANUNCIOS_TELEGRAM_BASE_URL", tgServer.URL)
+
+	app := cli.NewApp("test")
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"telegram", "setup", "--token", "valid-token", "--chat-id", "555123", "--format", "pretty"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("telegram setup --format pretty failed: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Telegram Bot: @setup_test_bot") {
+		t.Errorf("expected bot username in pretty output: %s", out)
+	}
+	if !strings.Contains(out, "Chat ID: 555123") || !strings.Contains(out, "Status: configured") {
+		t.Errorf("expected chat id and configured status: %s", out)
+	}
+}
+
+func TestTelegramSetup_MissingFlags(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MILANUNCIOS_CONFIG", filepath.Join(dir, "config.toml"))
+	t.Setenv("MILANUNCIOS_CREDENTIALS_FILE", filepath.Join(dir, "credentials.toml"))
+	t.Setenv("MILANUNCIOS_STATE_DB", filepath.Join(dir, "milanuncios.db"))
+	t.Setenv("MILANUNCIOS_TELEGRAM_TOKEN", "")
+
+	app := cli.NewApp("test")
+	var stdout, stderr bytes.Buffer
+	app.Stdout = &stdout
+	app.Stderr = &stderr
+
+	// Missing token
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"telegram", "setup", "--chat-id", "12345"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "telegram bot token is required") {
+		t.Errorf("expected missing token error, got: %v", err)
+	}
+
+	// Missing chat id
+	cmd = app.RootCmd()
+	cmd.SetArgs([]string{"telegram", "setup", "--token", "some-token"})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "telegram chat ID is required") {
+		t.Errorf("expected missing chat-id error, got: %v", err)
 	}
 }

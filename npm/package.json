@@ -1,6 +1,6 @@
 {
   "name": "milanuncios-cli",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Autonomous CLI & Model Context Protocol (MCP) server for Milanuncios marketplace",
   "main": "cli.cjs",
   "bin": {

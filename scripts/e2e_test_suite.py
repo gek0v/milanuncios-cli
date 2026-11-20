@@ -1202,11 +1202,246 @@ class TestIOIntegrity(MilanunciosCLITestCase):
 
 
 # ==============================================================================
+# 10. V0.3.0 DEAL SCORE & TELEGRAM INTEGRATION (Tests 61 - 68)
+# ==============================================================================
+class TestV030DealScoreAndTelegram(MilanunciosCLITestCase):
+
+    def _start_mock_v030_server(self):
+        class _MockHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/api/v1/ads/492817294"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "id": "492817294",
+                        "title": "Cannondale Topstone 1 Gravel",
+                        "price": 950.0,
+                        "category_id": 1102,
+                        "url": "https://www.milanuncios.com/bicicletas/cannondale-topstone-1-492817294.htm"
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                elif self.path.startswith("/api/v1/search"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "items": [
+                            {"id": "c-1", "title": "Cannondale Topstone 1", "price": 1200.0, "category_id": 1102, "url": "https://example.com/c1"},
+                            {"id": "c-2", "title": "Cannondale Topstone 1", "price": 1250.0, "category_id": 1102, "url": "https://example.com/c2"},
+                            {"id": "c-3", "title": "Cannondale Topstone 1", "price": 1150.0, "category_id": 1102, "url": "https://example.com/c3"},
+                            {"id": "c-4", "title": "Cannondale Topstone 1", "price": 1300.0, "category_id": 1102, "url": "https://example.com/c4"},
+                            {"id": "c-5", "title": "Cannondale Topstone 1", "price": 1100.0, "category_id": 1102, "url": "https://example.com/c5"},
+                            {"id": "c-6", "title": "Cannondale Topstone 1", "price": 1220.0, "category_id": 1102, "url": "https://example.com/c6"}
+                        ],
+                        "total": 6
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _MockHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.env["MILANUNCIOS_BASE_URL"] = f"http://127.0.0.1:{port}"
+        return server
+
+    def _start_mock_telegram_server(self):
+        class _MockTGHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                if "/getMe" in self.path:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "ok": True,
+                        "result": {
+                            "id": 123456789,
+                            "is_bot": True,
+                            "first_name": "Milanuncios E2E Bot",
+                            "username": "milanuncios_e2e_bot"
+                        }
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                elif "/sendMessage" in self.path:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "ok": True,
+                        "result": {
+                            "message_id": 101,
+                            "date": 1700000000,
+                            "chat": {"id": 123456},
+                            "text": "test"
+                        }
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), _MockTGHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.env["MILANUNCIOS_TELEGRAM_BASE_URL"] = f"http://127.0.0.1:{port}"
+        return server
+
+    def test_61_evaluate_syntax_and_validation(self):
+        res = self.run_cli("evaluate", "--help")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Deal Score", res.stdout)
+
+        # Missing required argument
+        res_missing = self.run_cli("evaluate")
+        self.assertEqual(res_missing.returncode, 2)
+        self.assertIn("accepts 1 arg(s)", res_missing.stderr)
+
+    def test_62_evaluate_ad_not_found_exit_code_4(self):
+        server = self._start_mock_v030_server()
+        try:
+            res = self.run_cli("evaluate", "999999999")
+            self.assertEqual(res.returncode, 4)
+            self.assertIn("not found", res.stderr.lower())
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_63_evaluate_with_mock_server_json_and_pretty_output(self):
+        server = self._start_mock_v030_server()
+        try:
+            # JSON format
+            res_json = self.run_cli("evaluate", "492817294", "--format", "json")
+            self.assertEqual(res_json.returncode, 0)
+            data = json.loads(res_json.stdout)
+            self.assertEqual(data.get("ad_id"), "492817294")
+            self.assertEqual(data.get("title"), "Cannondale Topstone 1 Gravel")
+            self.assertEqual(data.get("price"), 950.0)
+            self.assertIn("deal_score", data)
+            self.assertIn("rating", data)
+            self.assertIn("market_median", data)
+            self.assertIn("discount_percent", data)
+            self.assertIn("verdict", data)
+            self.assertTrue(data.get("deal_score") >= 50)
+
+            # Pretty format
+            res_pretty = self.run_cli("evaluate", "492817294", "--format", "pretty")
+            self.assertEqual(res_pretty.returncode, 0)
+            self.assertIn("Cannondale Topstone 1 Gravel", res_pretty.stdout)
+            self.assertIn("DEAL SCORE", res_pretty.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_64_search_min_deal_score(self):
+        res_help = self.run_cli("search", "--help")
+        self.assertEqual(res_help.returncode, 0)
+        self.assertIn("--min-deal-score", res_help.stdout)
+
+        # Invalid flag format
+        res_invalid = self.run_cli("search", "cannondale", "--min-deal-score", "not_a_number")
+        self.assertEqual(res_invalid.returncode, 2)
+
+        # Filter with mock server
+        server = self._start_mock_v030_server()
+        try:
+            res = self.run_cli("search", "cannondale", "--min-deal-score", "60", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertIn("items", data)
+            self.assertTrue(isinstance(data.get("items"), list))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_65_telegram_test_missing_token_exit_code_2(self):
+        self.env["MILANUNCIOS_TELEGRAM_TOKEN"] = ""
+        res = self.run_cli("telegram", "test")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("telegram bot token is required", res.stderr)
+
+    def test_66_telegram_test_with_mock_server(self):
+        server = self._start_mock_telegram_server()
+        try:
+            self.env["MILANUNCIOS_TELEGRAM_TOKEN"] = "valid-test-token"
+            # JSON format
+            res_json = self.run_cli("telegram", "test", "--format", "json")
+            self.assertEqual(res_json.returncode, 0)
+            data = json.loads(res_json.stdout)
+            self.assertEqual(data.get("status"), "connected")
+            self.assertEqual(data.get("bot", {}).get("username"), "milanuncios_e2e_bot")
+
+            # Pretty format
+            res_pretty = self.run_cli("telegram", "test", "--format", "pretty")
+            self.assertEqual(res_pretty.returncode, 0)
+            self.assertIn("Telegram Bot: @milanuncios_e2e_bot", res_pretty.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_67_telegram_setup_missing_flags_exit_code_2(self):
+        self.env["MILANUNCIOS_TELEGRAM_TOKEN"] = ""
+        # Missing token
+        res_no_token = self.run_cli("telegram", "setup", "--chat-id", "12345")
+        self.assertEqual(res_no_token.returncode, 2)
+        self.assertIn("telegram bot token is required", res_no_token.stderr)
+
+        # Missing chat id
+        res_no_chat = self.run_cli("telegram", "setup", "--token", "tok-xyz")
+        self.assertEqual(res_no_chat.returncode, 2)
+        self.assertIn("telegram chat ID is required", res_no_chat.stderr)
+
+    def test_68_telegram_setup_with_mock_server_success(self):
+        server = self._start_mock_telegram_server()
+        try:
+            self.env["MILANUNCIOS_TELEGRAM_TOKEN"] = ""
+            # JSON format setup execution
+            res = self.run_cli("telegram", "setup", "--token", "setup-tok-999", "--chat-id", "888777", "--format", "json")
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertTrue(data.get("confirmed"))
+            self.assertEqual(data.get("status"), "configured")
+            self.assertEqual(data.get("chat_id"), 888777)
+            self.assertEqual(data.get("bot", {}).get("username"), "milanuncios_e2e_bot")
+
+            # Verify credentials and config files on disk
+            creds_file = Path(self.env["MILANUNCIOS_CREDENTIALS_FILE"])
+            config_file = Path(self.env["MILANUNCIOS_CONFIG"])
+            self.assertTrue(creds_file.exists())
+            self.assertTrue(config_file.exists())
+
+            creds_content = creds_file.read_text(encoding="utf-8")
+            self.assertIn("setup-tok-999", creds_content)
+
+            config_content = config_file.read_text(encoding="utf-8")
+            self.assertIn("888777", config_content)
+            self.assertIn("enabled = true", config_content)
+
+            # Pretty format setup execution
+            res_pretty = self.run_cli("telegram", "setup", "--token", "setup-tok-999", "--chat-id", "888777", "--format", "pretty")
+            self.assertEqual(res_pretty.returncode, 0)
+            self.assertIn("Telegram Bot: @milanuncios_e2e_bot", res_pretty.stdout)
+            self.assertIn("Status: configured", res_pretty.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+# ==============================================================================
 # CLI Test Runner
 # ==============================================================================
 if __name__ == "__main__":
     print("=" * 70)
-    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (72 Tests)")
+    print("🚀 Running milanuncios-cli End-to-End Black-Box Test Suite (80 Tests)")
     print("=" * 70)
 
     suite = unittest.TestSuite()
@@ -1222,6 +1457,7 @@ if __name__ == "__main__":
         TestChatValidation,
         TestMCPSkillsAndAgent,
         TestIOIntegrity,
+        TestV030DealScoreAndTelegram,
     ]
 
     for tc in test_classes:
