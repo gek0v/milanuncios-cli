@@ -130,6 +130,23 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, opt
 	return &msg, nil
 }
 
+// GetUpdatesOptions specifies optional parameters for the getUpdates method.
+type GetUpdatesOptions struct {
+	Offset         int64    `json:"offset,omitempty"`
+	Limit          int      `json:"limit,omitempty"`
+	Timeout        int      `json:"timeout,omitempty"`
+	AllowedUpdates []string `json:"allowed_updates,omitempty"`
+}
+
+// GetUpdates receives incoming updates using long polling.
+func (c *Client) GetUpdates(ctx context.Context, opts *GetUpdatesOptions) ([]Update, error) {
+	var updates []Update
+	if err := c.postJSON(ctx, "getUpdates", opts, &updates); err != nil {
+		return nil, err
+	}
+	return updates, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, method string, reqBody any, dest any) error {
 	endpoint := fmt.Sprintf("%s/bot%s/%s", c.BaseURL, c.BotToken, method)
 
@@ -149,7 +166,17 @@ func (c *Client) postJSON(ctx context.Context, method string, reqBody any, dest 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.HTTP.Do(req)
+	httpClient := c.HTTP
+	if opts, ok := reqBody.(*GetUpdatesOptions); ok && opts != nil && opts.Timeout > 0 {
+		needed := time.Duration(opts.Timeout)*time.Second + 15*time.Second
+		if httpClient.Timeout > 0 && httpClient.Timeout < needed {
+			cloned := *httpClient
+			cloned.Timeout = needed
+			httpClient = &cloned
+		}
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return sanitizeError(err, c.BotToken)
 	}

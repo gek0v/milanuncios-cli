@@ -100,6 +100,7 @@ Errors go to stderr; exit codes follow the semantic contract documented in docs/
 		a.skillsCmd(),
 		a.favoriteCmd(),
 		a.evaluateCmd(),
+		a.telegramCmd(),
 	)
 
 	return root

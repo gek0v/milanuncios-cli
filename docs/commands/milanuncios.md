@@ -42,5 +42,6 @@ milanuncios [flags]
 * [milanuncios search](milanuncios_search.md)	 - Search listings on Milanuncios
 * [milanuncios sink](milanuncios_sink.md)	 - Manage and test notification sinks (ntfy, webhooks, exec)
 * [milanuncios skills](milanuncios_skills.md)	 - Export documentation and prompt guidelines for AI Agents
+* [milanuncios telegram](milanuncios_telegram.md)	 - Manage Telegram bot and inbound message daemon
 * [milanuncios watch](milanuncios_watch.md)	 - Monitor searches and listings with local SQLite engine
 

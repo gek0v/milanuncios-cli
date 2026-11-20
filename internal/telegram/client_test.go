@@ -234,3 +234,122 @@ func TestClient_TokenRedactionInErrors(t *testing.T) {
 		t.Errorf("expected [REDACTED] in error message: %q", errStr)
 	}
 }
+
+func TestClient_GetUpdates_Success(t *testing.T) {
+	var receivedBody map[string]any
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botsecret-token/getUpdates" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read body: %v", err)
+		}
+		_ = json.Unmarshal(b, &receivedBody)
+
+		resp := map[string]any{
+			"ok": true,
+			"result": []map[string]any{
+				{
+					"update_id": 100,
+					"message": map[string]any{
+						"message_id": 501,
+						"date":       1700000000,
+						"chat": map[string]any{
+							"id":   123456,
+							"type": "private",
+						},
+						"text": "Hola",
+					},
+				},
+				{
+					"update_id": 101,
+					"message": map[string]any{
+						"message_id": 502,
+						"date":       1700000010,
+						"chat": map[string]any{
+							"id":   123456,
+							"type": "private",
+						},
+						"text": "Respondo al mensaje",
+						"reply_to_message": map[string]any{
+							"message_id": 4892,
+							"date":       1699999900,
+							"chat": map[string]any{
+								"id":   123456,
+								"type": "private",
+							},
+						},
+					},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	c := telegram.NewClient("secret-token", telegram.WithBaseURL(ts.URL))
+	opts := &telegram.GetUpdatesOptions{
+		Offset:         100,
+		Limit:          50,
+		Timeout:        30,
+		AllowedUpdates: []string{"message", "callback_query"},
+	}
+
+	updates, err := c.GetUpdates(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d", len(updates))
+	}
+	if updates[0].UpdateID != 100 || updates[0].Message.Text != "Hola" {
+		t.Errorf("unexpected update 0: %+v", updates[0])
+	}
+	if updates[1].UpdateID != 101 || updates[1].Message.ReplyToMessage == nil || updates[1].Message.ReplyToMessage.MessageID != 4892 {
+		t.Errorf("unexpected update 1: %+v", updates[1])
+	}
+
+	// Verify request payload sent to Telegram
+	if off, ok := receivedBody["offset"].(float64); !ok || int64(off) != 100 {
+		t.Errorf("unexpected offset: %v", receivedBody["offset"])
+	}
+	if lim, ok := receivedBody["limit"].(float64); !ok || int(lim) != 50 {
+		t.Errorf("unexpected limit: %v", receivedBody["limit"])
+	}
+	if tout, ok := receivedBody["timeout"].(float64); !ok || int(tout) != 30 {
+		t.Errorf("unexpected timeout: %v", receivedBody["timeout"])
+	}
+}
+
+func TestClient_GetUpdates_Error(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		resp := map[string]any{
+			"ok":          false,
+			"error_code":  409,
+			"description": "Conflict: terminated by other getUpdates request",
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	c := telegram.NewClient("secret-token", telegram.WithBaseURL(ts.URL))
+	updates, err := c.GetUpdates(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("expected error, got updates: %v", updates)
+	}
+
+	var apiErr *telegram.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *telegram.APIError, got %T: %v", err, err)
+	}
+	if apiErr.ErrorCode != 409 {
+		t.Errorf("expected error code 409, got %d", apiErr.ErrorCode)
+	}
+}
