@@ -803,3 +803,101 @@ func TestStore_EventDeliveriesAndUndelivered(t *testing.T) {
 		t.Fatalf("expected 0 undelivered events, got %d", len(undeliveredAfter))
 	}
 }
+
+func TestStore_GetPriceHistory(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+
+	// Querying non-existent ad should return empty slice, not error
+	pts, err := st.GetPriceHistory(ctx, "non-existent")
+	if err != nil {
+		t.Fatalf("unexpected error for non-existent ad: %v", err)
+	}
+	if len(pts) != 0 {
+		t.Fatalf("expected 0 points, got %d", len(pts))
+	}
+
+	w := &store.Watch{
+		Type:        "ad",
+		Name:        "ad_history_test",
+		Target:      "999001",
+		IntervalSec: 60,
+		CreatedAt:   time.Now().UTC(),
+		Status:      "active",
+	}
+	if err := st.AddWatch(ctx, w); err != nil {
+		t.Fatalf("add watch: %v", err)
+	}
+
+	// 1. Seen item fallback
+	seenItem := &store.SeenItem{
+		WatchID:     w.ID,
+		AdID:        "999001",
+		FirstSeenAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC),
+		LastSeenAt:  time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC),
+		LastPrice:   500.0,
+		LastTitle:   "Item 999001",
+		RawJSON:     "{}",
+	}
+	if err := st.UpsertSeenItem(ctx, seenItem); err != nil {
+		t.Fatalf("upsert seen item: %v", err)
+	}
+
+	ptsSeen, err := st.GetPriceHistory(ctx, "999001")
+	if err != nil {
+		t.Fatalf("get price history with seen item: %v", err)
+	}
+	if len(ptsSeen) != 1 || ptsSeen[0].Price != 500.0 {
+		t.Fatalf("expected 1 point of 500€ from seen items, got %v", ptsSeen)
+	}
+
+	// 2. Events override / augment
+	ev1 := &store.Event{
+		WatchID:   w.ID,
+		EventType: "ad.new",
+		AdID:      "999001",
+		PayloadJSON: store.EncodeJSON(map[string]any{
+			"event": "ad.new",
+			"ad": map[string]any{
+				"id":    "999001",
+				"price": 500.0,
+			},
+		}),
+		CreatedAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC),
+	}
+	if err := st.RecordEvent(ctx, ev1); err != nil {
+		t.Fatalf("record ev1: %v", err)
+	}
+
+	ev2 := &store.Event{
+		WatchID:   w.ID,
+		EventType: "ad.price_changed",
+		AdID:      "999001",
+		PayloadJSON: store.EncodeJSON(map[string]any{
+			"event":     "ad.price_changed",
+			"old_price": 500.0,
+			"new_price": 450.0,
+			"diff":      -50.0,
+		}),
+		CreatedAt: time.Date(2026, 11, 5, 15, 30, 0, 0, time.UTC),
+	}
+	if err := st.RecordEvent(ctx, ev2); err != nil {
+		t.Fatalf("record ev2: %v", err)
+	}
+
+	ptsEv, err := st.GetPriceHistory(ctx, "999001")
+	if err != nil {
+		t.Fatalf("get price history with events: %v", err)
+	}
+	if len(ptsEv) != 2 {
+		t.Fatalf("expected 2 points, got %d (%v)", len(ptsEv), ptsEv)
+	}
+	if ptsEv[0].Price != 500.0 || ptsEv[1].Price != 450.0 {
+		t.Fatalf("unexpected prices: %v", ptsEv)
+	}
+}

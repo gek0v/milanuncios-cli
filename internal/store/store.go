@@ -288,6 +288,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_seen_items_last_seen ON seen_items(last_seen_at);
 	CREATE INDEX IF NOT EXISTS idx_events_watch ON events(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered);
+	CREATE INDEX IF NOT EXISTS idx_events_ad ON events(ad_id);
 	CREATE INDEX IF NOT EXISTS idx_event_deliveries_sink ON event_deliveries(sink_name, status);
 	CREATE INDEX IF NOT EXISTS idx_fav_annotations_tag ON favorite_annotations(tag);
 	`
@@ -1073,4 +1074,97 @@ func EncodeJSON(v any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// PricePoint represents an ad's recorded price at a specific date.
+type PricePoint struct {
+	Date  string  `json:"date"`
+	Price float64 `json:"price"`
+}
+
+// GetPriceHistory retrieves the chronological price history recorded for an ad.
+func (s *Store) GetPriceHistory(ctx context.Context, adID string) ([]PricePoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `
+	SELECT event_type, payload_json, created_at
+	FROM events
+	WHERE ad_id = ? AND event_type IN ('ad.new', 'ad.price_changed')
+	ORDER BY id ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query, adID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []PricePoint
+	for rows.Next() {
+		var eventType, payloadJSON, createdStr string
+		if err := rows.Scan(&eventType, &payloadJSON, &createdStr); err != nil {
+			return nil, err
+		}
+
+		dateStr := createdStr
+		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+			dateStr = t.Format("02/01/2006")
+		} else if t, err := time.Parse("2006-01-02 15:04:05", createdStr); err == nil {
+			dateStr = t.Format("02/01/2006")
+		} else if len(dateStr) > 10 {
+			dateStr = dateStr[:10]
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			continue
+		}
+
+		switch eventType {
+		case "ad.new":
+			var price float64
+			if adMap, ok := payload["ad"].(map[string]any); ok {
+				if p, ok := adMap["price"].(float64); ok {
+					price = p
+				}
+			} else if p, ok := payload["price"].(float64); ok {
+				price = p
+			}
+			if price > 0 {
+				points = append(points, PricePoint{Date: dateStr, Price: price})
+			}
+		case "ad.price_changed":
+			oldPrice, _ := payload["old_price"].(float64)
+			newPrice, _ := payload["new_price"].(float64)
+			if len(points) == 0 && oldPrice > 0 {
+				points = append(points, PricePoint{Date: dateStr, Price: oldPrice})
+			}
+			if newPrice > 0 {
+				points = append(points, PricePoint{Date: dateStr, Price: newPrice})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(points) == 0 {
+		var firstSeenStr string
+		var lastPrice float64
+		seenQuery := `SELECT first_seen_at, last_price FROM seen_items WHERE ad_id = ? ORDER BY first_seen_at ASC LIMIT 1`
+		err := s.db.QueryRowContext(ctx, seenQuery, adID).Scan(&firstSeenStr, &lastPrice)
+		if err == nil && lastPrice > 0 {
+			dateStr := firstSeenStr
+			if t, err := time.Parse(time.RFC3339, firstSeenStr); err == nil {
+				dateStr = t.Format("02/01/2006")
+			} else if t, err := time.Parse("2006-01-02 15:04:05", firstSeenStr); err == nil {
+				dateStr = t.Format("02/01/2006")
+			} else if len(dateStr) > 10 {
+				dateStr = dateStr[:10]
+			}
+			points = append(points, PricePoint{Date: dateStr, Price: lastPrice})
+		}
+	}
+
+	return points, nil
 }
