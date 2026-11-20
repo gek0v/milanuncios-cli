@@ -559,12 +559,14 @@ func (cd *ConversationDetails) Pretty(w io.Writer, color bool) {
 
 // ChatMessageReceivedEvent represents an incoming chat message event.
 type ChatMessageReceivedEvent struct {
-	EventType      string `json:"event_type"`
-	ConversationID string `json:"conversation_id"`
-	AdID           string `json:"ad_id"`
-	SenderName     string `json:"sender_name"`
-	Text           string `json:"text"`
-	SentAt         string `json:"sent_at"`
+	EventType      string  `json:"event_type"`
+	ConversationID string  `json:"conversation_id"`
+	AdID           string  `json:"ad_id"`
+	AdTitle        string  `json:"ad_title,omitempty"`
+	AdPrice        float64 `json:"ad_price,omitempty"`
+	SenderName     string  `json:"sender_name"`
+	Text           string  `json:"text"`
+	SentAt         string  `json:"sent_at"`
 }
 
 // Pretty renders the chat event for human terminals.

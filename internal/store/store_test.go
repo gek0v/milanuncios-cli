@@ -901,3 +901,61 @@ func TestStore_GetPriceHistory(t *testing.T) {
 		t.Fatalf("unexpected prices: %v", ptsEv)
 	}
 }
+
+func TestTelegramMessageMap(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	// 1. Not found test
+	_, err = s.GetTelegramMessageMap(ctx, 99999)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	// 2. Save mapping
+	err = s.SaveTelegramMessageMap(ctx, 4892, "conv-101", "ad-555", "Bicicleta Cannondale", "Carlos M.")
+	if err != nil {
+		t.Fatalf("failed to save telegram message map: %v", err)
+	}
+
+	// 3. Retrieve mapping
+	m, err := s.GetTelegramMessageMap(ctx, 4892)
+	if err != nil {
+		t.Fatalf("failed to get telegram message map: %v", err)
+	}
+	if m.TelegramMsgID != 4892 {
+		t.Errorf("expected msgID 4892, got %d", m.TelegramMsgID)
+	}
+	if m.ConversationID != "conv-101" {
+		t.Errorf("expected convID 'conv-101', got %q", m.ConversationID)
+	}
+	if m.AdID != "ad-555" {
+		t.Errorf("expected adID 'ad-555', got %q", m.AdID)
+	}
+	if m.AdTitle != "Bicicleta Cannondale" {
+		t.Errorf("expected adTitle 'Bicicleta Cannondale', got %q", m.AdTitle)
+	}
+	if m.OpponentName != "Carlos M." {
+		t.Errorf("expected opponentName 'Carlos M.', got %q", m.OpponentName)
+	}
+	if m.CreatedAt.IsZero() {
+		t.Errorf("expected non-zero created_at")
+	}
+
+	// 4. Update on conflict
+	err = s.SaveTelegramMessageMap(ctx, 4892, "conv-101", "ad-555", "Bicicleta Cannondale Editada", "Carlos M.")
+	if err != nil {
+		t.Fatalf("failed to update telegram message map: %v", err)
+	}
+	mUpdated, err := s.GetTelegramMessageMap(ctx, 4892)
+	if err != nil {
+		t.Fatalf("failed to get updated map: %v", err)
+	}
+	if mUpdated.AdTitle != "Bicicleta Cannondale Editada" {
+		t.Errorf("expected updated title 'Bicicleta Cannondale Editada', got %q", mUpdated.AdTitle)
+	}
+}

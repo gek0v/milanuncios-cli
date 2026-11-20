@@ -20,9 +20,23 @@ type ProfileCredentials struct {
 	UpdatedAt    string            `toml:"updated_at,omitempty"`
 }
 
+// TelegramCredentials holds credentials for the Telegram Bot.
+type TelegramCredentials struct {
+	BotToken string `toml:"bot_token,omitempty"`
+}
+
 // Credentials holds credentials for all profiles stored securely in credentials.toml.
 type Credentials struct {
 	Profiles map[string]ProfileCredentials `toml:"profiles,omitempty"`
+	Telegram TelegramCredentials           `toml:"telegram,omitempty"`
+}
+
+// TelegramToken returns the configured Telegram Bot token, with fallback to MILANUNCIOS_TELEGRAM_TOKEN env var.
+func (c *Credentials) TelegramToken() string {
+	if c != nil && c.Telegram.BotToken != "" {
+		return c.Telegram.BotToken
+	}
+	return os.Getenv("MILANUNCIOS_TELEGRAM_TOKEN")
 }
 
 // NewCredentials creates an empty Credentials structure.

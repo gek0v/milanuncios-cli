@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/milanuncios"
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/gek0v/milanuncios-cli/internal/sink"
@@ -55,6 +56,12 @@ func (a *App) newWatchEngine(st *store.Store) *watch.Engine {
 		var opts []sink.Option
 		if a.Client != nil && a.Client.HTTP != nil && a.Client.HTTP.Transport != nil {
 			opts = append(opts, sink.WithTransport(a.Client.HTTP.Transport))
+		}
+		if st != nil {
+			opts = append(opts, sink.WithStore(st))
+		}
+		if creds, err := config.LoadCredentials(a.Paths.CredentialsFile); err == nil && creds != nil {
+			opts = append(opts, sink.WithCredentials(creds))
 		}
 		if mgr, err := sink.NewManager(a.Cfg.Sinks, opts...); err == nil {
 			eng.Sinks = mgr

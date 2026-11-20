@@ -17,19 +17,44 @@ import (
 	"github.com/gek0v/milanuncios-cli/internal/config"
 	"github.com/gek0v/milanuncios-cli/internal/output"
 	"github.com/gek0v/milanuncios-cli/internal/store"
+	"github.com/gek0v/milanuncios-cli/internal/telegram"
 )
 
 // Option configures sinks.
 type Option func(*options)
 
 type options struct {
-	transport http.RoundTripper
+	transport      http.RoundTripper
+	store          *store.Store
+	credentials    *config.Credentials
+	telegramClient *telegram.Client
 }
 
 // WithTransport configures a custom HTTP transport (e.g. for proxy support).
 func WithTransport(tr http.RoundTripper) Option {
 	return func(o *options) {
 		o.transport = tr
+	}
+}
+
+// WithStore configures the database store for sinks requiring local persistence.
+func WithStore(st *store.Store) Option {
+	return func(o *options) {
+		o.store = st
+	}
+}
+
+// WithCredentials configures application credentials for sinks.
+func WithCredentials(creds *config.Credentials) Option {
+	return func(o *options) {
+		o.credentials = creds
+	}
+}
+
+// WithTelegramClient configures a pre-instantiated Telegram Client.
+func WithTelegramClient(c *telegram.Client) Option {
+	return func(o *options) {
+		o.telegramClient = c
 	}
 }
 
@@ -290,6 +315,11 @@ func (s *ExecSink) Send(ctx context.Context, ev store.Event) error {
 
 // FromConfig instantiates a Sink from configuration.
 func FromConfig(name string, cfg config.SinkConfig, opts ...Option) (Sink, error) {
+	var opt options
+	for _, fn := range opts {
+		fn(&opt)
+	}
+
 	switch strings.ToLower(cfg.Type) {
 	case "ntfy":
 		return NewNtfySink(name, cfg.URL, cfg.Topic, opts...)
@@ -297,8 +327,37 @@ func FromConfig(name string, cfg config.SinkConfig, opts ...Option) (Sink, error
 		return NewWebhookSink(name, cfg.URL, cfg.TokenFile, opts...)
 	case "exec":
 		return NewExecSink(name, cfg.Command)
+	case "telegram":
+		var chatIDs []int64
+		if len(cfg.ChatIDs) > 0 {
+			chatIDs = cfg.ChatIDs
+		} else if cfg.ChatID != 0 {
+			chatIDs = []int64{cfg.ChatID}
+		}
+		token := cfg.BotToken
+		if token == "" && opt.credentials != nil {
+			token = opt.credentials.TelegramToken()
+		}
+		if token == "" {
+			token = os.Getenv("MILANUNCIOS_TELEGRAM_TOKEN")
+		}
+		if token == "" && opt.telegramClient == nil {
+			return nil, output.Usagef("telegram sink %q requires bot_token (or MILANUNCIOS_TELEGRAM_TOKEN)", name)
+		}
+		tgClient := opt.telegramClient
+		if tgClient == nil {
+			var tgOpts []telegram.Option
+			if opt.transport != nil {
+				tgOpts = append(tgOpts, telegram.WithTransport(opt.transport))
+			}
+			if cfg.URL != "" {
+				tgOpts = append(tgOpts, telegram.WithBaseURL(cfg.URL))
+			}
+			tgClient = telegram.NewClient(token, tgOpts...)
+		}
+		return NewTelegramSink(name, tgClient, chatIDs, opt.store)
 	default:
-		return nil, output.Usagef("unknown sink type %q for sink %q (supported: ntfy, webhook, exec)", cfg.Type, name)
+		return nil, output.Usagef("unknown sink type %q for sink %q (supported: ntfy, webhook, exec, telegram)", cfg.Type, name)
 	}
 }
 

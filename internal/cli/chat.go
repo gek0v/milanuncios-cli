@@ -248,6 +248,8 @@ func (a *App) chatWatchCmd() *cobra.Command {
 							EventType:      "chat.message_received",
 							ConversationID: c.ID,
 							AdID:           c.AdID,
+							AdTitle:        c.AdTitle,
+							AdPrice:        c.AdPrice,
 							SenderName:     msg.SenderName,
 							Text:           msg.Text,
 							SentAt:         msg.SentAt,

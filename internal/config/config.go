@@ -19,6 +19,7 @@ type Config struct {
 	Profiles       map[string]ProfileConfig `toml:"profiles,omitempty"`
 	Watch          WatchConfig              `toml:"watch,omitempty"`
 	Sinks          map[string]SinkConfig    `toml:"sinks,omitempty"`
+	Telegram       TelegramConfig           `toml:"telegram,omitempty"`
 }
 
 // ProfileConfig represents per-profile configuration.
@@ -40,6 +41,13 @@ type WatchConfig struct {
 	Interval string `toml:"interval,omitempty"`
 }
 
+// TelegramConfig represents settings for the Telegram Bot integration.
+type TelegramConfig struct {
+	Enabled        bool    `toml:"enabled,omitempty"`
+	AllowedChatIDs []int64 `toml:"allowed_chat_ids,omitempty"`
+	AutoMarkRead   bool    `toml:"auto_mark_read,omitempty"`
+}
+
 // SinkConfig represents an external notification target.
 type SinkConfig struct {
 	Type      string   `toml:"type"`
@@ -48,6 +56,9 @@ type SinkConfig struct {
 	Template  string   `toml:"template,omitempty"`
 	Command   []string `toml:"command,omitempty"`
 	TokenFile string   `toml:"token_file,omitempty"`
+	ChatID    int64    `toml:"chat_id,omitempty"`
+	ChatIDs   []int64  `toml:"chat_ids,omitempty"`
+	BotToken  string   `toml:"bot_token,omitempty"`
 }
 
 // New creates an initialized empty Config.
@@ -168,6 +179,18 @@ func (c *Config) Get(key string) (any, error) {
 			return p.Location, nil
 		}
 		return p, nil
+	case "telegram":
+		if len(parts) > 1 {
+			switch parts[1] {
+			case "enabled":
+				return c.Telegram.Enabled, nil
+			case "allowed_chat_ids":
+				return c.Telegram.AllowedChatIDs, nil
+			case "auto_mark_read":
+				return c.Telegram.AutoMarkRead, nil
+			}
+		}
+		return c.Telegram, nil
 	default:
 		return nil, fmt.Errorf("unknown config key %q", key)
 	}
@@ -230,6 +253,26 @@ func (c *Config) Set(key, value string) error {
 			return nil
 		}
 		return fmt.Errorf("unknown profile key %q", key)
+	case "telegram":
+		if len(parts) == 2 {
+			switch parts[1] {
+			case "enabled":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid boolean for telegram.enabled: %w", err)
+				}
+				c.Telegram.Enabled = b
+				return nil
+			case "auto_mark_read":
+				b, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid boolean for telegram.auto_mark_read: %w", err)
+				}
+				c.Telegram.AutoMarkRead = b
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown or unsupported telegram key %q", key)
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}

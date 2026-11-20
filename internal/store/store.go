@@ -283,6 +283,15 @@ func (s *Store) migrate() error {
 		updated_at TEXT NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS telegram_message_map (
+		telegram_msg_id INTEGER PRIMARY KEY,
+		conversation_id TEXT NOT NULL,
+		ad_id           TEXT NOT NULL,
+		ad_title        TEXT NOT NULL,
+		opponent_name   TEXT NOT NULL,
+		created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_watches_name ON watches(name);
 	CREATE INDEX IF NOT EXISTS idx_seen_items_watch ON seen_items(watch_id);
 	CREATE INDEX IF NOT EXISTS idx_seen_items_last_seen ON seen_items(last_seen_at);
@@ -291,6 +300,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_events_ad ON events(ad_id);
 	CREATE INDEX IF NOT EXISTS idx_event_deliveries_sink ON event_deliveries(sink_name, status);
 	CREATE INDEX IF NOT EXISTS idx_fav_annotations_tag ON favorite_annotations(tag);
+	CREATE INDEX IF NOT EXISTS idx_tg_map_conv ON telegram_message_map(conversation_id);
 	`
 	var err error
 	for attempt := 0; attempt < 20; attempt++ {
@@ -1167,4 +1177,56 @@ func (s *Store) GetPriceHistory(ctx context.Context, adID string) ([]PricePoint,
 	}
 
 	return points, nil
+}
+
+// TelegramMessageMap records a sent Telegram message mapped to a Milanuncios conversation.
+type TelegramMessageMap struct {
+	TelegramMsgID  int64     `json:"telegram_msg_id"`
+	ConversationID string    `json:"conversation_id"`
+	AdID           string    `json:"ad_id"`
+	AdTitle        string    `json:"ad_title"`
+	OpponentName   string    `json:"opponent_name"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// SaveTelegramMessageMap records a mapping between a sent Telegram message and a Milanuncios conversation.
+func (s *Store) SaveTelegramMessageMap(ctx context.Context, msgID int64, convID, adID, adTitle, opponentName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `
+	INSERT INTO telegram_message_map (telegram_msg_id, conversation_id, ad_id, ad_title, opponent_name, created_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(telegram_msg_id) DO UPDATE SET
+		conversation_id = excluded.conversation_id,
+		ad_id = excluded.ad_id,
+		ad_title = excluded.ad_title,
+		opponent_name = excluded.opponent_name
+	`
+	_, err := s.db.ExecContext(ctx, query, msgID, convID, adID, adTitle, opponentName, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// GetTelegramMessageMap retrieves the mapping for a Telegram message ID, or ErrNotFound if absent.
+func (s *Store) GetTelegramMessageMap(ctx context.Context, msgID int64) (*TelegramMessageMap, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var m TelegramMessageMap
+	var createdStr string
+	query := `SELECT telegram_msg_id, conversation_id, ad_id, ad_title, opponent_name, created_at FROM telegram_message_map WHERE telegram_msg_id = ? LIMIT 1`
+	err := s.db.QueryRowContext(ctx, query, msgID).Scan(&m.TelegramMsgID, &m.ConversationID, &m.AdID, &m.AdTitle, &m.OpponentName, &createdStr)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+		m.CreatedAt = t
+	} else if t, err := time.Parse("2006-01-02 15:04:05", createdStr); err == nil {
+		m.CreatedAt = t
+	}
+	return &m, nil
 }

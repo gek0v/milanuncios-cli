@@ -130,3 +130,62 @@ func TestSavePermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestTelegramConfig_SaveLoadAndGetSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.toml")
+
+	cfg := config.New()
+	cfg.Telegram.Enabled = true
+	cfg.Telegram.AllowedChatIDs = []int64{123456, 789012}
+	cfg.Telegram.AutoMarkRead = true
+	cfg.Sinks["tg-sink"] = config.SinkConfig{
+		Type:     "telegram",
+		ChatID:   123456,
+		ChatIDs:  []int64{123456, 789012},
+		BotToken: "test-bot-token",
+	}
+
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if !loaded.Telegram.Enabled {
+		t.Errorf("expected telegram.enabled to be true")
+	}
+	if len(loaded.Telegram.AllowedChatIDs) != 2 || loaded.Telegram.AllowedChatIDs[0] != 123456 {
+		t.Errorf("unexpected allowed_chat_ids: %v", loaded.Telegram.AllowedChatIDs)
+	}
+	if !loaded.Telegram.AutoMarkRead {
+		t.Errorf("expected telegram.auto_mark_read to be true")
+	}
+	sc, ok := loaded.Sinks["tg-sink"]
+	if !ok {
+		t.Fatalf("tg-sink not found in sinks")
+	}
+	if sc.ChatID != 123456 || len(sc.ChatIDs) != 2 || sc.BotToken != "test-bot-token" {
+		t.Errorf("unexpected sink config: %+v", sc)
+	}
+
+	// Test Get / Set for telegram
+	if err := loaded.Set("telegram.enabled", "false"); err != nil {
+		t.Fatalf("failed to set telegram.enabled: %v", err)
+	}
+	val, err := loaded.Get("telegram.enabled")
+	if err != nil || val != false {
+		t.Fatalf("expected telegram.enabled to be false, got %v (err: %v)", val, err)
+	}
+
+	if err := loaded.Set("telegram.auto_mark_read", "false"); err != nil {
+		t.Fatalf("failed to set telegram.auto_mark_read: %v", err)
+	}
+	val, err = loaded.Get("telegram.auto_mark_read")
+	if err != nil || val != false {
+		t.Fatalf("expected telegram.auto_mark_read to be false, got %v (err: %v)", val, err)
+	}
+}

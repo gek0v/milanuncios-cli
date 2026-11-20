@@ -72,3 +72,17 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 		t.Fatal("expected profile 'default' to be removed")
 	}
 }
+
+func TestTelegramCredentials_Fallback(t *testing.T) {
+	creds := config.NewCredentials()
+	t.Setenv("MILANUNCIOS_TELEGRAM_TOKEN", "env-telegram-token")
+
+	if token := creds.TelegramToken(); token != "env-telegram-token" {
+		t.Errorf("expected env fallback 'env-telegram-token', got %q", token)
+	}
+
+	creds.Telegram.BotToken = "explicit-bot-token"
+	if token := creds.TelegramToken(); token != "explicit-bot-token" {
+		t.Errorf("expected explicit token 'explicit-bot-token', got %q", token)
+	}
+}
